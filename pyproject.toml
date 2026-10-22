@@ -17,6 +17,7 @@ Issues = "https://github.com/OvertureMaps/matchers/issues"
 
 [dependency-groups]
 dev = [
+    "duckdb>=1.1",  # parity/ harness and its tests
     "pyspark>=3.5,<3.6",  # matches the Glue 5 runtime
     "pytest>=8.0",
     "ruff==0.17.0",  # pre-commit and CI (ruff-action version-file) both read this; keep required-version below in sync
@@ -30,7 +31,7 @@ build-backend = "setuptools.build_meta"
 include = ["overture_matchers*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "parity"]
 
 [tool.ruff]
 required-version = "0.17.0"
