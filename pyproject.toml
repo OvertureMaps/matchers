@@ -1,0 +1,48 @@
+[project]
+name = "overture-matchers"
+# simplification: static version until publishing is set up, then setuptools_scm like overture-core.
+version = "0.0.0"
+description = "Python matchers for conflating Overture Maps data: places, divisions, and addresses."
+authors = [{ name = "Overture Maps Foundation" }]
+license = "MIT"
+license-files = ["LICENSE"]
+readme = "README.md"
+requires-python = ">=3.11"
+# PySpark is not a runtime dependency: AWS Glue 5 provides Spark 3.5.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/OvertureMaps/matchers"
+Issues = "https://github.com/OvertureMaps/matchers/issues"
+
+[dependency-groups]
+dev = [
+    "pyspark>=3.5,<3.6",  # matches the Glue 5 runtime
+    "pytest>=8.0",
+    "ruff==0.17.0",  # pre-commit and CI (ruff-action version-file) both read this; keep required-version below in sync
+]
+
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["overture_matchers*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+required-version = "0.17.0"
+
+[tool.ruff.lint]
+ignore = ["E501"]  # line length enforced by ruff format
+select = [
+    "F401",  # unused imports
+    "F403",  # star imports (`from x import *`)
+    "F821",  # undefined names (missing imports / typos)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["E402", "E712", "F811", "F405", "F403"]
+"**/conftest.py" = ["F401"]  # pytest discovers fixtures via import side effects
