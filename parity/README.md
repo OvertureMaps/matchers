@@ -1,6 +1,6 @@
 # Parity harness
 
-Compares matcher runs on the same input, to gate the Scala-to-Python port ([#1](https://github.com/OvertureMaps/matchers/issues/1)). It lives outside the `overture_matchers` package and is deleted once the Scala matcher is archived.
+Compares matcher runs on the same input, to gate the Scala-to-Python port ([#1](https://github.com/OvertureMaps/matchers/issues/1)). It lives outside the `overture_matchers` package and is decommissioned once parity confirms the migration.
 
 - `compare.py A_RUN B_RUN` prints the gate metrics as JSON: ID agreement (overall and per slice), cluster agreement and edge agreement. `--stage setup|matching` diffs one stage's outputs instead.
 - `launch.py` starts N Glue runs cloned from a template run and prints their run folders as JSON.
