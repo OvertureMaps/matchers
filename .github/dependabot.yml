@@ -19,12 +19,13 @@ updates:
     cooldown:
       default-days: 7
     commit-message:
-      prefix: "[CHORE](deps)"
-      include: "scope"
+      prefix: "chore"
 
-  # Maintain uv-managed Python dependencies
+  # Maintain uv-managed Python dependencies: the root ruff pin and each package.
   - package-ecosystem: "uv"
-    directory: "/"
+    directories:
+      - "/"
+      - "/packages/*"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 3
@@ -39,5 +40,7 @@ updates:
     cooldown:
       default-days: 7
     commit-message:
-      prefix: "[CHORE](py-deps)"
-      include: "scope"
+      prefix: "chore"
+    ignore:
+      # Pinned to the AWS Glue runtime's Spark; bump deliberately with Glue.
+      - dependency-name: "pyspark"

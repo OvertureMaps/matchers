@@ -2,7 +2,9 @@
 
 Python matchers for conflating Overture Maps data: places, divisions, and addresses.
 
-Each matcher runs as a PySpark job on AWS Glue 5 (Spark 3.5, Python 3.11). It matches incoming records against the Overture baseline and assigns GERS IDs. This repo is a port of the Scala [overture-matchers](https://github.com/OvertureMaps/overture-matchers); the plan and progress are tracked in [#1](https://github.com/OvertureMaps/matchers/issues/1).
+Each matcher runs as a PySpark job on AWS Glue 5 (Spark 3.5, Python 3.11). It matches incoming records against the Overture baseline and assigns GERS IDs. This repo is a port of Overture's Scala matchers; the plan and progress are tracked in [#1](https://github.com/OvertureMaps/matchers/issues/1).
+
+The matcher package, [`overture-matchers`](packages/overture_matchers), lives under [`packages/`](packages) and is published to PyPI.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup.
 

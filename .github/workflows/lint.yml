@@ -1,5 +1,5 @@
 # Lint: ruff format check and ruff check over the whole repo, using the ruff
-# version pinned in pyproject.toml.
+# version pinned in the root pyproject.toml and the rules in ruff.toml.
 
 name: Lint
 
@@ -10,7 +10,7 @@ on:
 permissions: {} # no workflow-level access; each job grants only what it needs
 
 concurrency:
-  group: lint-${{ github.head_ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
