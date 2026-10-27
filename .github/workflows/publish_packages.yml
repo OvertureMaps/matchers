@@ -111,9 +111,11 @@ jobs:
         if: github.event_name == 'push'
         working-directory: packages/${{ matrix.package }}
         env:
-          # GITHUB_TOKEN has no `workflows` permission, so GitHub can reject
-          # the tag push when the released range changes .github/workflows/.
-          # The fix is a GitHub App token with contents and workflows write.
+          # GITHUB_TOKEN can't push a tag whose .github/workflows/ differs from
+          # every branch tip, which happens only when a newer workflow change
+          # lands on main first. The next run that touches the package then
+          # releases these commits; a GitHub App token with workflows write
+          # avoids the limit.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config --global user.name "github-actions[bot]"
