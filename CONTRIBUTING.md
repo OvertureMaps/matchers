@@ -25,7 +25,7 @@ If Java 17 is not your default JVM, point `JAVA_HOME` at it, for example `export
 uv run ruff check . && uv run ruff format --check .
 ```
 
-CI runs both on every pull request.
+CI lints every pull request and tests each package the pull request changes.
 
 ## Releases
 

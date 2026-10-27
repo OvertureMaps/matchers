@@ -16,11 +16,11 @@ Each package's `pyproject.toml` declares `dynamic = ["version"]`. [`setuptools-s
 | `feat: ...`                                | minor |
 | any other type (`fix`, `chore`, `docs`...) | patch |
 
-PRs are squash-merged, so the PR title is the commit PSR reads. PSR attributes a commit to a package by the files it touched (`path_filters`), not by its scope.
+PRs are squash-merged, so the PR title is the commit PSR reads. PSR attributes a commit to a package by the files it touched (`path_filters`), not by its scope. Only files that ship in the package count (its source, `pyproject.toml`, `README.md` and `LICENSE`), so changes to tests or `uv.lock` alone release nothing.
 
 ## Release
 
-On push to `main`, [`publish_packages.yml`](.github/workflows/publish_packages.yml) runs PSR for each package the push touched. If a bump is warranted, PSR tags `<package_dir>-v<version>` and publishes a GitHub Release with the notes; nothing is committed back to `main`. The job then builds with `uv build`, validates with `twine check --strict` and publishes to PyPI by trusted publishing.
+On push to `main`, [`publish_packages.yml`](.github/workflows/publish_packages.yml) runs PSR for each package the push touched. If a bump is warranted, PSR tags `<package_dir>-v<version>` (pushed with an overture-pull-requester App token, since `GITHUB_TOKEN` can't push tags that change workflows) and publishes a GitHub Release with the notes; nothing is committed back to `main`. The job then builds with `uv build`, validates with `twine check --strict` and publishes to PyPI by trusted publishing.
 
 A manual run (`workflow_dispatch`) is a smoke test: no tag or release, every package builds from its current state and publishes to [Test PyPI](https://test.pypi.org/).
 
