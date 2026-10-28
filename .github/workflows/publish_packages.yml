@@ -44,15 +44,16 @@ jobs:
     name: detect-changes
     permissions:
       contents: read # forwarded to discover-packages.yml's checkout step
-    uses: ./.github/workflows/discover-packages.yml # zizmor: ignore[self-repository] actionlint rejects $/
+    uses: $/.github/workflows/discover-packages.yml
 
   release:
     name: release ${{ matrix.package }}
     needs: detect-changes
     if: github.event_name == 'push' && needs.detect-changes.outputs.packages != '[]'
     runs-on: ubuntu-latest
-    # No environment, so the OIDC subject stays
-    # repo:OvertureMaps/matchers:ref:refs/heads/main, which the AWS role trusts.
+    # No environment, so the OIDC subject is
+    # repo:OvertureMaps/matchers:ref:refs/heads/main and the AWS role's trust
+    # can later be narrowed to main.
     permissions:
       contents: read # checkout; the tag push uses the App token
       id-token: write # AWS OIDC

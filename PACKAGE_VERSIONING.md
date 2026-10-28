@@ -30,4 +30,4 @@ A manual run (`workflow_dispatch`) is a smoke test: no tag or release, every pac
 
 ## Trusted publishing setup (one-time per package)
 
-On both [pypi.org](https://pypi.org/manage/account/publishing/) and [test.pypi.org](https://test.pypi.org/manage/account/publishing/), add a trusted publisher (a pending one reserves the name before the first upload) for this repo and workflow `publish_packages.yml`, with environment `pypi-<package_dir>` on PyPI and `testpypi-<package_dir>` on Test PyPI. Create both environments in this repo before the first release, with deployment branches limited to `main`; GitHub would otherwise create them unprotected on first use.
+On both [pypi.org](https://pypi.org/manage/account/publishing/) and [test.pypi.org](https://test.pypi.org/manage/account/publishing/), add a trusted publisher (a pending one reserves the name before the first upload) for this repo and workflow `publish_packages.yml`, with environment `pypi-<package_dir>` on PyPI and `testpypi-<package_dir>` on Test PyPI. GitHub creates the environments on first use.
