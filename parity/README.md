@@ -7,6 +7,12 @@ Compares matcher runs on the same input, to gate the Scala-to-Python port ([#1](
 
 Both are [uv scripts](https://docs.astral.sh/uv/guides/scripts/) with inline dependencies; `--help` documents every option. Run folders keep Scala's layout, `<run folder>/<stage output>/type=<table>/`, and runs need `outputDebug=true`, which `launch.py` sets. Both sides of a comparison must use the same model version.
 
+CI doesn't run the tests. Run them by hand from the repo root; they use local fixtures and no AWS:
+
+```bash
+uv run --with pytest --with duckdb pytest parity/
+```
+
 ## Workflows
 
 Scala noise floor: two Scala runs, compared with each other.

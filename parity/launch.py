@@ -4,7 +4,7 @@
 # requires-python = ">=3.11"
 # dependencies = ["boto3", "duckdb>=1.1"]
 # ///
-"""Start N Glue matcher runs cloned from a template run, wait, and print their run folders as JSON.
+r"""Start N Glue matcher runs cloned from a template run, wait, and print their run folders as JSON.
 
 The template is an existing Glue job run of either matcher. Its arguments
 supply the input, baseline, model, jars and Spark conf, so the runs match it;
@@ -20,7 +20,7 @@ needs. A Scala template (it has `--runId`) gets a distinct `runId` under
                   the stages before the first one in `stages`, then compare.py
                   `--stage matching` against SCALA_RUN.
 
-    AWS_PROFILE=x uv run parity/launch.py --job-name JOB --template-run-id jr_... \\
+    AWS_PROFILE=x uv run parity/launch.py --job-name JOB --template-run-id jr_... \
         --output-root s3://BUCKET/parity/NAME [--runs 2] [--set key=value] [--seed-from RUN]
 
 Both sides of a comparison must use the same model version. Template arguments
@@ -33,7 +33,7 @@ import argparse
 import json
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from compare import STAGE_OUTPUTS
 
@@ -175,7 +175,7 @@ def main() -> None:
         "JobRun"
     ]
     run_fields = {k: template[k] for k in CLONED_RUN_FIELDS if k in template}
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
     builds = [
         build_arguments(
             template.get("Arguments", {}),

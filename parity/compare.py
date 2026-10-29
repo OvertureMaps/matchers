@@ -84,7 +84,7 @@ def scan(run: str, folder: str, table: str) -> str:
 
 
 def ratio(num: int, den: int) -> float:
-    """num / den, or 1.0 when there is nothing to compare."""
+    """Return num / den, or 1.0 when there is nothing to compare."""
     return num / den if den else 1.0
 
 

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 by the Overture Maps Foundation
+# ruff: noqa: D103
 """Checks compare.py and launch.py on tiny synthetic run folders; no AWS involved.
 
 The reference run has candidates c1 and c2 matched to baseline b1, and c3 and
@@ -232,7 +233,8 @@ def test_seed_folders_cover_the_stages_before_the_first_requested():
 
 def test_seed_copies_folders_under_the_new_run_folder():
     class FakeS3:
-        copied = []
+        def __init__(self):
+            self.copied = []
 
         def get_paginator(self, _):
             return self
