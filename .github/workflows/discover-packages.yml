@@ -1,14 +1,9 @@
 # Discover Packages
 #
-# Reusable workflow shared by test_python.yml and publish_packages.yml so
-# both stay in lockstep on what "a package" means, instead of each carrying
-# its own copy of this logic.
-#
-# On pull_request/push, finds the packages/ subdirectories actually touched
-# by the diff (tj-actions/changed-files). On workflow_dispatch, or when the
-# diff touches the package CI workflows themselves, considers every
-# directory under packages/. Either way, a directory only counts if it looks
-# like a real package (has both pyproject.toml and tests/).
+# This workflow is shared by test_python.yml and publish_packages.yml so both
+# agree on what a package is. Pushes and PRs consider the packages/ directories
+# the diff touches, and workflow_dispatch considers all of them. A directory
+# counts only if it has both pyproject.toml and tests/.
 
 name: Discover Packages
 
@@ -48,8 +43,8 @@ jobs:
           json: true
           escape_json: false
 
-      # Changes to the package CI itself retest every package. Root ruff.toml
-      # isn't listed because lint.yml already covers it.
+      # A change to these workflows retests every package. Root ruff.toml is
+      # left out because lint.yml already covers it.
       - name: Find changed package CI workflows
         id: ci-changed
         if: github.event_name != 'workflow_dispatch'

@@ -1,7 +1,6 @@
 # Shared ruff config. Each package's pyproject.toml extends this file.
 
 [format]
-# ruff format is Black-compatible by default.
 
 [lint]
 extend-select = [
@@ -16,4 +15,4 @@ convention = "google"
 
 [lint.per-file-ignores]
 "**/tests/**" = ["D", "F403"]
-"**/conftest.py" = ["F401"]  # pytest discovers fixtures via import side effects
+"**/conftest.py" = ["F401"]  # pytest finds fixtures through these imports, and ruff cannot see that they are used.

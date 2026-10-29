@@ -1,10 +1,10 @@
 # Test Python Packages
 #
 # Tests each package under packages/ that the change touches (see
-# discover-packages.yml): `uv sync --locked`, `uv run pytest`, then
-# `uv build` and `twine check --strict` so bad PyPI metadata fails the PR
-# instead of a release after merge. Java 17 is installed because the tests
-# start a local SparkSession. Adding a package needs no edits here.
+# discover-packages.yml). Each run syncs the locked environment, runs pytest,
+# then builds the package and runs `twine check` in strict mode, so bad PyPI
+# metadata fails the PR before it reaches a release. Java 17 is installed
+# because the tests start a local SparkSession.
 
 name: Test Python
 
@@ -47,7 +47,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0 # setuptools_scm needs tag history to resolve the version
+          fetch-depth: 0 # setuptools_scm needs the tag history to resolve the version.
           persist-credentials: false
 
       - name: Install Python
@@ -78,12 +78,13 @@ jobs:
       - name: Check package metadata
         run: uvx twine check --strict dist/*
 
-  # Rollup status job - require this in branch protection. A skipped test job
-  # (no package touched) counts as passing.
+  # Branch protection should require this rollup job. A test job skipped
+  # because no package changed counts as passing.
   rollup-python-test-status:
     name: rollup-python-test-status
     runs-on: ubuntu-latest
-    permissions: {} # are-we-good only reads job results from `needs` context
+    # are-we-good reads job results from the needs context, so it needs no token scopes.
+    permissions: {}
     needs:
       - detect-changes
       - test

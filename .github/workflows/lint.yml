@@ -1,5 +1,4 @@
-# Lint: ruff format check and ruff check over the whole repo, using the ruff
-# version pinned in the root pyproject.toml and the rules in ruff.toml.
+# This workflow lints the whole repo with the ruff pinned in the root pyproject.toml.
 
 name: Lint
 
@@ -7,7 +6,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
-permissions: {} # no workflow-level access; each job grants only what it needs
+permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -34,11 +33,12 @@ jobs:
           args: "check"
           version-file: "pyproject.toml"
 
-  # Rollup status job - require this in branch protection
+  # Branch protection should require this rollup job.
   rollup-lint-status:
     name: rollup-lint-status
     runs-on: ubuntu-latest
-    permissions: {} # are-we-good only reads job results from `needs` context
+    # are-we-good reads job results from the needs context, so it needs no token scopes.
+    permissions: {}
     needs:
       - python
     if: always()

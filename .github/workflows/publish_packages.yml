@@ -1,28 +1,22 @@
 # Publish Python Packages
 #
-# Auto-discovers packages the same way as test_python.yml (see
-# discover-packages.yml). Three jobs per package, so the App key used to push
-# release tags never shares a job with the build toolchain or PyPI upload:
+# Discovers packages as test_python.yml does (see discover-packages.yml).
+# Each package gets three jobs, which keep the App key that pushes release
+# tags away from the build toolchain and the PyPI upload.
 #
-# - release (push to main only): python-semantic-release inspects the
-#   commits since the package's last release tag (attributing them by which
-#   files they touched, via path_filters, not by a required commit scope)
-#   and, if a release is warranted, pushes a `<package_dir>-v<version>` tag
-#   and a GitHub Release. No version bump or changelog is committed back.
-# - build (no secrets): on push, builds only if HEAD carries the package's
-#   release tag, so a re-run also resumes a tagged-but-unpublished release.
-#   Validates with `twine check --strict` and uploads dist/ as an artifact.
-# - publish (id-token only): uploads that artifact by trusted publishing,
-#   skipping versions already on the index.
+# The release job runs only on pushes to main. PSR tags the package and
+# creates a GitHub Release when its changed files warrant one.
+# The build job holds no secrets. It builds only when HEAD carries the
+# package's release tag, runs `twine check` in strict mode, and uploads dist/
+# as an artifact.
+# The publish job holds only id-token permission. It uploads that artifact
+# through trusted publishing and skips versions already on the index.
 #
-# On workflow_dispatch: a pure smoke test. No tagging, no GitHub Release:
-# every package builds from its current (unreleased) state and publishes to
-# Test PyPI, so the pipeline can be exercised without touching main's
-# release history or real PyPI.
+# On workflow_dispatch, every package builds from its current state and
+# publishes to Test PyPI without tagging or a GitHub Release.
 #
-# See PACKAGE_VERSIONING.md for the full flow and the one-time
-# trusted-publisher setup (on both pypi.org and test.pypi.org) a new package
-# needs.
+# See PACKAGE_VERSIONING.md for the release flow and the trusted-publisher
+# setup a new package needs.
 
 name: Publish Python Packages
 
@@ -36,10 +30,11 @@ permissions: {} # no workflow-level access; each job grants only what it needs
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false # never cancel a release/publish mid-flight
+  cancel-in-progress: false # Releases and publishes must finish, so later runs queue behind them.
 
 jobs:
-  # A workflow-only push discovers every package; path_filters make PSR a no-op.
+  # A push that touches only workflows lists every package. PSR then releases nothing,
+  # because path_filters match no package files.
   detect-changes:
     name: detect-changes
     permissions:
@@ -51,9 +46,9 @@ jobs:
     needs: detect-changes
     if: github.event_name == 'push' && needs.detect-changes.outputs.packages != '[]'
     runs-on: ubuntu-latest
-    # No environment, so the OIDC subject is
-    # repo:OvertureMaps/matchers:ref:refs/heads/main and the AWS role's trust
-    # can later be narrowed to main.
+    # This job has no environment, so its OIDC subject is
+    # repo:OvertureMaps/matchers:ref:refs/heads/main and the role trust can be
+    # narrowed to main later.
     permissions:
       contents: read # checkout; the tag push uses the App token
       id-token: write # AWS OIDC
@@ -68,33 +63,24 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # uv 0.13.4 is the first release that no longer trusts the compromised
-      # emSign ECC Root CA - G3 (GHSA-hq85-5cpj-mr62).
       - name: Install uv
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          version: ">=0.13.4"
-          enable-cache: false # this workflow publishes a runtime artifact; don't risk a poisoned cache
+          enable-cache: false # This workflow publishes a runtime artifact, so it must not trust a cache.
 
-      # The official Docker action resolves GitPython (an unpinned transitive
-      # dependency) at image-build time, so every run picks up whatever
-      # GitPython release is newest. GitPython v3.1.60 dropped the
-      # `Actor.name_email_regex` class attribute that PSR v10.6.1 (latest as
-      # of writing) still reads unconditionally, breaking config load for
-      # every user of the action regardless of which PSR tag is pinned. The
-      # fix is an open PR with no PSR release yet, so install PSR ourselves
-      # as an isolated uv tool where we can pin GitPython below the broken
-      # release. Revert to the Docker action once a fixed PSR version ships.
-      # See: https://github.com/python-semantic-release/python-semantic-release/issues/1476
+      # The official Docker action resolves an unpinned GitPython. GitPython
+      # v3.1.60 removed Actor.name_email_regex, which PSR 10.6.1 reads at
+      # config load. This step installs PSR directly and pins GitPython below
+      # that release. Revert to the Docker action once a fixed PSR version ships.
+      # Issue: https://github.com/python-semantic-release/python-semantic-release/issues/1476
       - name: Install python-semantic-release
         run: uv tool install "python-semantic-release==10.6.1" --with "gitpython<3.1.60"
 
-      # GITHUB_TOKEN can never be granted the `workflows` permission, so PSR's
-      # tag push is rejected when the tagged commit's .github/workflows/
-      # differs from every branch tip. overture-pull-requester has
-      # contents:write and workflows:write, so mint a token from it instead.
+      # GITHUB_TOKEN can't push a tag whose commit has .github/workflows/
+      # differing from every branch tip, so the tag goes out with an
+      # overture-pull-requester App token, which has workflows write.
       - name: Configure AWS credentials for pull-requester PEM
-        # Narrow OIDC role that can only read this secret.
+        # This role can read only the pull-requester PEM secret.
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: arn:aws:iam::816069134238:role/gha-pull-requester-secrets-reader
@@ -117,8 +103,8 @@ jobs:
           permission-contents: write
           permission-workflows: write
 
-      # The token outlives these, so PSR and its dependencies never see the
-      # App key or the credentials that can read it again.
+      # The App token is minted by now, so clearing these keeps the App key and
+      # the AWS credentials that can read it away from PSR and its dependencies.
       - name: Drop the App key and AWS credentials
         run: |
           {
@@ -128,13 +114,10 @@ jobs:
             echo "AWS_SESSION_TOKEN="
           } >> "$GITHUB_ENV"
 
-      # Computes the next version from the commits since this package's last
-      # release tag, attributing each commit to the package by its changed
-      # files (see path_filters in the package's pyproject.toml), and, if a
-      # release is warranted, tags and pushes it (no commit, no committed
-      # changelog; release notes go to the GitHub Release instead). PSR
-      # authenticates its own git push with GH_TOKEN, independent of the
-      # checkout step's (deliberately non-persisted) credentials.
+      # PSR picks the version from commits that touch the package (path_filters
+      # in its pyproject.toml), then tags, pushes, and creates the GitHub
+      # Release with the notes. It writes no commit or changelog. It pushes with
+      # GH_TOKEN because the checkout does not persist credentials.
       - name: Release ${{ matrix.package }}
         working-directory: packages/${{ matrix.package }}
         env:
@@ -147,8 +130,8 @@ jobs:
   build:
     name: build ${{ matrix.package }}
     needs: [detect-changes, release]
-    # Runs after release whether it succeeded, failed or was skipped
-    # (dispatch): the tag check below decides what to build.
+    # !cancelled() lets this run after release fails or is skipped on dispatch,
+    # because the tag check below decides what to build.
     if: ${{ !cancelled() && needs.detect-changes.result == 'success' && needs.detect-changes.outputs.packages != '[]' }}
     runs-on: ubuntu-latest
     permissions:
@@ -161,11 +144,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0 # tags, including one release just pushed, for setuptools_scm
+          fetch-depth: 0 # setuptools_scm needs the tags, including one the release job just pushed.
           persist-credentials: false
 
-      # On push, build only a release tagged at HEAD. That covers both a
-      # release made by this run and one a failed earlier run left unpublished.
+      # On push, build only when HEAD carries the package's release tag. That
+      # covers a release from this run and one a failed earlier run left
+      # unpublished, so a re-run resumes it.
       - name: Check for a release tag at HEAD
         id: should-build
         working-directory: packages/${{ matrix.package }}
@@ -189,18 +173,14 @@ jobs:
         if: steps.should-build.outputs.build == 'true'
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
-          version: ">=0.13.4"
-          enable-cache: false # this workflow publishes a runtime artifact; don't risk a poisoned cache
+          enable-cache: false # This workflow publishes a runtime artifact, so it must not trust a cache.
 
       - name: Build package
         if: steps.should-build.outputs.build == 'true'
         working-directory: packages/${{ matrix.package }}
         run: uv build
 
-      # Twine's built-in check is what PyPI itself uses to validate metadata
-      # (long_description rendering, required fields, valid classifiers) at
-      # upload time; running it here fails the build early instead of
-      # silently rejecting or mangling the package's PyPI page.
+      # twine check fails the job here when PyPI would reject the metadata at upload.
       - name: Check package metadata
         if: steps.should-build.outputs.build == 'true'
         working-directory: packages/${{ matrix.package }}
@@ -221,9 +201,8 @@ jobs:
     if: ${{ !cancelled() && needs.build.result != 'skipped' }}
     runs-on: ubuntu-latest
     environment:
-      # workflow_dispatch never touches the real pypi-<package> environment
-      # (and its trusted publisher scoped to pypi.org): it publishes under a
-      # separate testpypi-<package> environment scoped to test.pypi.org.
+      # Dispatch publishes through testpypi-<package>, whose trusted publisher is
+      # scoped to test.pypi.org. Pushes use pypi-<package>.
       name: ${{ github.event_name == 'workflow_dispatch' && format('testpypi-{0}', matrix.package) || format('pypi-{0}', matrix.package) }}
     permissions:
       id-token: write # PyPI/TestPyPI trusted publishing
@@ -232,8 +211,8 @@ jobs:
       matrix:
         package: ${{ fromJSON(needs.detect-changes.outputs.packages) }}
     steps:
-      # A pattern that matches nothing downloads nothing, leaving dist/ empty
-      # for packages with no release to publish.
+      # A pattern with no match downloads nothing. The hashFiles guards below
+      # then skip publishing, so packages without a release are safe.
       - name: Download distributions
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -245,11 +224,11 @@ jobs:
         if: github.event_name == 'push' && hashFiles('dist/*') != ''
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
-          skip-existing: true # a re-run after a partial upload
+          skip-existing: true # Lets a re-run after a partial upload skip files already on the index.
 
       - name: Publish to Test PyPI (smoke test)
         if: github.event_name == 'workflow_dispatch' && hashFiles('dist/*') != ''
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           repository-url: https://test.pypi.org/legacy/
-          skip-existing: true # repeat dispatches on one commit build the same dev version
+          skip-existing: true # Repeat dispatches on one commit build the same dev version.

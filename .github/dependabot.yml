@@ -1,7 +1,6 @@
 ---
 version: 2
 updates:
-  # Maintain GitHub Actions dependencies
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -21,7 +20,6 @@ updates:
     commit-message:
       prefix: "chore"
 
-  # Maintain uv-managed Python dependencies: the root ruff pin and each package.
   - package-ecosystem: "uv"
     directories:
       - "/"
@@ -42,5 +40,5 @@ updates:
     commit-message:
       prefix: "chore"
     ignore:
-      # Pinned to the AWS Glue runtime's Spark; bump deliberately with Glue.
+      # This pin matches the Spark version in AWS Glue 5.0, so bump it only alongside a Glue upgrade.
       - dependency-name: "pyspark"
