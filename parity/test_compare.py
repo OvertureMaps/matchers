@@ -147,18 +147,22 @@ def test_stage_setup_diffs_columns_within_tolerance(tmp_path):
 
 
 def test_stage_matching_reports_pairs_and_flips(tmp_path):
+    pair = ["id", "record_type", "base_id", "base_record_type"]
+
     def run(name, scores):
-        pairs = [(i, b) for i, b, _ in scores]
-        write(tmp_path / name, "blocking", ["id", "base_id"], pairs)
-        write(tmp_path / name, "scores", ["id", "base_id", "composite_score"], scores)
+        # b3 is also a candidate, so c3 has a candidate-candidate row too.
+        rows = [(i, "candidate", b, "baseline", s) for i, b, s in scores]
+        rows += [("c3", "candidate", "b3", "candidate", 0.1)]
+        write(tmp_path / name, "blocking", pair, [r[:4] for r in rows])
+        write(tmp_path / name, "scores", [*pair, "composite_score"], rows)
         accepted = [
             (i, b, "candidate_baseline", "k") for i, b, s in scores if s >= 0.48
         ]
         write(
             tmp_path / name,
             "matches_validated",
-            ["id", "base_id"],
-            [(i, b) for i, b, *_ in accepted],
+            pair,
+            [(i, "candidate", b, "baseline") for i, b, *_ in accepted],
         )
         write(
             tmp_path / name,
@@ -181,6 +185,8 @@ def test_stage_matching_reports_pairs_and_flips(tmp_path):
         r["tables"]["blocking"]["keys_only_a"],
         r["tables"]["blocking"]["keys_only_b"],
     ) == (1, 1)
+    scores = r["tables"]["scores"]
+    assert (scores["duplicate_keys_a"], scores["keys_both"]) == (0, 4)
     assert r["tables"]["blocking"]["flips"] is None
     flips = r["tables"]["scores"]["flips"]
     assert flips["n"] == 2

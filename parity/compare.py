@@ -42,7 +42,9 @@ STAGE_OUTPUTS = {
     "assignid": ["idMap", "final", "fallout"],
     "metrics": ["metrics"],
 }
-PAIR_KEY = ["id", "base_id"]
+# The unioned matcher pairs candidates and baseline in both directions, and an ID
+# can sit on both sides, so the record types are part of a pair's key.
+PAIR_KEY = ["id", "record_type", "base_id", "base_record_type"]
 # Row keys of the outputs `--stage` diffs column by column.
 DIFF_KEYS = {
     "candidates": ["id"],
@@ -325,8 +327,10 @@ def score_flips(
         "n": rows[0][-1] if rows else 0,
         "max_distance": rows[0][-2] if rows else None,
         "examples": [
-            {"id": i, "base_id": bi, "score_a": sa, "score_b": sb, "distance": d}
-            for i, bi, sa, sb, d, _ in rows
+            dict(
+                zip([*PAIR_KEY, "score_a", "score_b", "distance"], r[:-1], strict=True)
+            )
+            for r in rows
         ],
     }
 
