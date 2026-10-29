@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 by the Overture Maps Foundation
-"""Checks that the package imports and a local SparkSession starts.
+"""Checks that the package imports and a local SparkSession runs a query.
 
-Matcher tests run on a local SparkSession, so this fails first when Java 17
-or PySpark is missing from the environment.
+A missing Java 17 or PySpark fails here first.
 """
 
 import overture_matchers

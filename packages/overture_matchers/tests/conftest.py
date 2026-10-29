@@ -11,16 +11,20 @@ from pyspark.sql import SparkSession
 
 @pytest.fixture(scope="session")
 def spark():
-    # Python UDF workers must use the venv interpreter, not the system one.
+    # UDF workers must run under this venv's interpreter, which is
+    # sys.executable here.
     os.environ["PYSPARK_PYTHON"] = sys.executable
     session = (
         SparkSession.builder.master("local[1]")
         .appName("overture-matchers-tests")
-        # Loopback only: the machine's hostname often doesn't resolve on laptops or VPNs.
+        # The driver binds to loopback, because the hostname often fails to
+        # resolve on laptops and VPNs.
         .config("spark.driver.bindAddress", "127.0.0.1")
         .config("spark.driver.host", "127.0.0.1")
         .config("spark.sql.shuffle.partitions", "1")
         .config("spark.ui.enabled", "false")
+        # UTC keeps timestamp results independent of the machine's timezone.
+        .config("spark.sql.session.timeZone", "UTC")
         .getOrCreate()
     )
     yield session

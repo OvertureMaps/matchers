@@ -1,0 +1,71 @@
+[project]
+name = "overture-matchers"
+dynamic = ["version"]
+description = "Python matchers for conflating Overture Maps data: places, divisions, and addresses."
+authors = [{ name = "Overture Maps Foundation" }]
+license = "MIT"
+# This is a vendored copy of the repo-root LICENSE, because a "../../LICENSE"
+# path lands outside the sdist root and PyPI rejects the upload.
+license-files = ["LICENSE"]
+readme = "README.md"
+requires-python = ">=3.11"
+keywords = ["overture", "overturemaps", "conflation", "spark"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+]
+# AWS Glue provides Spark at runtime, so PySpark stays a dev dependency.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/OvertureMaps/matchers"
+Source = "https://github.com/OvertureMaps/matchers/tree/main/packages/overture_matchers"
+Issues = "https://github.com/OvertureMaps/matchers/issues"
+
+[dependency-groups]
+dev = [
+    "pyspark==3.5.4",  # This is the Spark version in AWS Glue 5.0.
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["setuptools>=77.0.3", "setuptools_scm>=8.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["overture_matchers"]
+
+[tool.setuptools_scm]
+# The root setting points setuptools_scm at the monorepo git repo. The
+# anchored tag_regex keeps other packages' tags from matching.
+root = "../.."
+tag_regex = "^overture_matchers-v(?P<version>[0-9].*)$"
+git_describe_command = "git describe --dirty --tags --long --match 'overture_matchers-v*'"
+# PyPI rejects the +g<hash> local suffix setuptools_scm adds between tags, so
+# versions omit it, including untagged Test PyPI builds.
+local_scheme = "no-local-version"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+extend = "../../ruff.toml"
+
+[tool.semantic_release]
+commit_parser = "conventional-monorepo"
+tag_format = "overture_matchers-v{version}"
+allow_zero_version = true
+
+# Paths are relative to this directory, because the release job runs here.
+# Only shipped files count, so test-only changes and uv.lock bumps do not
+# release. See PACKAGE_VERSIONING.md.
+[tool.semantic_release.commit_parser_options]
+path_filters = ["overture_matchers", "pyproject.toml", "README.md", "LICENSE"]
+# This floors every recognized type (docs, style, refactor, chore, build, ci, test
+# included) at a patch bump, so every push that changes this package produces
+# a new version. PSR 10.6.1's schema takes the integer value of LevelBump, and
+# the name "patch" fails validation. 2 is LevelBump.PATCH.
+default_bump_level = 2

@@ -1,7 +1,6 @@
 ---
 version: 2
 updates:
-  # Maintain GitHub Actions dependencies
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -19,12 +18,12 @@ updates:
     cooldown:
       default-days: 7
     commit-message:
-      prefix: "[CHORE](deps)"
-      include: "scope"
+      prefix: "chore"
 
-  # Maintain uv-managed Python dependencies
   - package-ecosystem: "uv"
-    directory: "/"
+    directories:
+      - "/"
+      - "/packages/*"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 3
@@ -39,5 +38,7 @@ updates:
     cooldown:
       default-days: 7
     commit-message:
-      prefix: "[CHORE](py-deps)"
-      include: "scope"
+      prefix: "chore"
+    ignore:
+      # This pin matches the Spark version in AWS Glue 5.0, so bump it only alongside a Glue upgrade.
+      - dependency-name: "pyspark"
