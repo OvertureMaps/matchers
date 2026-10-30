@@ -1,8 +1,8 @@
 # Parity harness
 
-Compares matcher runs on the same input, to gate the Scala-to-Python port ([#1](https://github.com/OvertureMaps/matchers/issues/1)). It lives outside the `overture_matchers` package and is decommissioned once parity confirms the migration.
+Compares two matcher runs on the same input and prints where they differ, for people evaluating the Scala-to-Python port ([#1](https://github.com/OvertureMaps/matchers/issues/1)). It lives outside the `overture_matchers` package and is decommissioned once parity confirms the migration.
 
-- `compare.py A_RUN B_RUN` prints the gate metrics as JSON: ID agreement (overall and per slice), cluster agreement and edge agreement. `--stage setup|matching` diffs one stage's outputs instead.
+- `compare.py A_RUN B_RUN` prints JSON for a human to read, with no pass or fail verdict: ID agreement (overall and broken down by country and match type), cluster agreement and edge agreement. `--stage setup|matching` diffs one stage's outputs instead.
 - `launch.py` starts N Glue runs cloned from a template run and prints their run folders as JSON.
 
 Both are [uv scripts](https://docs.astral.sh/uv/guides/scripts/) with inline dependencies; `--help` documents every option. Run folders keep Scala's layout, `<run folder>/<stage output>/type=<table>/`, and runs need `outputDebug=true`, which `launch.py` sets. Both sides of a comparison must use the same model version.

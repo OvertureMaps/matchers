@@ -41,14 +41,14 @@ def write(run: Path, folder: str, columns: list[str], rows: list[tuple]) -> None
 def make_run(
     root: Path, name: str, matches=REFERENCE_MATCHES, ids=REFERENCE_IDS
 ) -> str:
-    """A run folder with gate outputs. `matches` rows are (id, base_id, match_sub_type, cluster_id)."""
+    """A run folder with the outputs compare.py reads. `matches` rows are (id, base_id, match_sub_type, cluster_id)."""
     run = root / name
     write(run, "baseline", ["id"], [(b,) for b in BASELINE])
     write(
         run,
         "candidates",
-        ["id", "country", "provider"],
-        [(c, k, "p") for c, k in CANDIDATES.items()],
+        ["id", "country"],
+        [(c, k) for c, k in CANDIDATES.items()],
     )
     write(run, "idMap", ["id", "assigned_id"], list(ids.items()))
     rows = [(i, b, "nomatch" if b is None else "match", s, k) for i, b, s, k in matches]

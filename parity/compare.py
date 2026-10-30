@@ -4,15 +4,17 @@
 # requires-python = ">=3.11"
 # dependencies = ["duckdb>=1.1"]
 # ///
-"""Compare two matcher runs on the same input and print how far apart they are, as JSON.
+"""Compare two matcher runs on the same input and print where they differ, as JSON.
 
 A run is a run folder in Scala's stage layout, `<run>/<folder>/type=<table>/`.
-Run A is the reference, run B the run under test. Without `--stage`, the report
-holds the parity gate metrics, which need the assignid stage's debug outputs
+Run A is the reference, run B the run under test. The report holds numbers for
+a human to read, not a pass or fail verdict. Without `--stage`, it holds three
+agreement metrics, which need the assignid stage's debug outputs
 (`outputDebug=true`):
 
   id       share of candidates with the same outcome: the same reused ID, or both
-           minted a new ID for the same set of candidates. Overall and per slice.
+           minted a new ID for the same set of candidates. Overall and broken
+           down by country and match type.
   cluster  pairwise precision and recall of "same cluster". Cluster IDs are
            arbitrary, so only membership is compared.
   edge     precision and recall of accepted pairs, a diagnostic.
@@ -56,7 +58,7 @@ DIFF_KEYS = {
 # Places model thresholds per output folder. Scala persists no blocking score,
 # so blocking flips appear only when both runs write `composite_score` there.
 THRESHOLDS = {"blocking": 0.08, "scores": 0.48}
-SLICES = ["country", "provider", "match_sub_type"]
+BREAKDOWNS = ["country", "match_sub_type"]
 NUMERIC_TYPES = {
     "TINYINT",
     "SMALLINT",
@@ -119,15 +121,15 @@ def load_clusters(
     """)
 
 
-def load_slices(con: duckdb.DuckDBPyConnection, run: str, table: str) -> None:
-    """Create the `slices` view: the reference run's candidates plus `match_sub_type`.
+def load_breakdowns(con: duckdb.DuckDBPyConnection, run: str, table: str) -> None:
+    """Create the `breakdowns` view: the reference run's candidates plus `match_sub_type`.
 
     A candidate's `match_sub_type` is the best across its match rows, which
     alphabetical order gives: candidate_baseline, candidate_candidate, nomatch.
     """
     matches = scan(run, "matches", table)
     con.execute(f"""
-        CREATE VIEW slices AS
+        CREATE VIEW breakdowns AS
         SELECT c.*, t.match_sub_type
         FROM {scan(run, "candidates", table)} c
         LEFT JOIN (
@@ -146,8 +148,8 @@ def id_agreement(con: duckdb.DuckDBPyConnection, by: str | None = None) -> list[
     A candidate missing from either run's idMap counts as a disagreement.
 
     Args:
-        con: Connection holding the `a_ids`, `b_ids` and `slices` views.
-        by: `slices` column to group by, or None for the overall figure.
+        con: Connection holding the `a_ids`, `b_ids` and `breakdowns` views.
+        by: `breakdowns` column to group by, or None for the overall figure.
 
     Returns:
         One `{"value", "n", "agreement"}` dict per group.
@@ -155,7 +157,7 @@ def id_agreement(con: duckdb.DuckDBPyConnection, by: str | None = None) -> list[
     grp, join = "NULL", ""
     if by:
         grp = "s.grp"
-        join = f'LEFT JOIN (SELECT id, any_value("{by}") AS grp FROM slices GROUP BY id) s USING (id)'
+        join = f'LEFT JOIN (SELECT id, any_value("{by}") AS grp FROM breakdowns GROUP BY id) s USING (id)'
     rows = con.execute(f"""
         SELECT {grp} AS value, count(*) AS n,
                avg(CAST(coalesce(CASE
@@ -375,7 +377,7 @@ def compare(
     a_run: str,
     b_run: str,
     table: str = "place",
-    group_by: list[str] = SLICES,
+    group_by: list[str] = BREAKDOWNS,
     stage: str | None = None,
     tolerance: float = 1e-6,
     thresholds: dict[str, float] = THRESHOLDS,
@@ -386,9 +388,9 @@ def compare(
         a_run: Reference run folder.
         b_run: Run folder under test.
         table: Value of the `type=` partition to compare.
-        group_by: Slices for the ID agreement breakdown: columns of A's
+        group_by: Columns to break ID agreement down by: columns of A's
             candidates, or `match_sub_type`.
-        stage: Diff this stage's outputs instead of computing the gate metrics.
+        stage: Diff this stage's outputs instead of computing the agreement metrics.
         tolerance: Largest absolute difference at which numbers agree (`stage` only).
         thresholds: Score threshold per output folder (`stage` only).
 
@@ -405,7 +407,7 @@ def compare(
     else:
         for tag, run in runs.items():
             load_ids(con, tag, run, table)
-        load_slices(con, a_run, table)
+        load_breakdowns(con, a_run, table)
         overall = id_agreement(con)[0]
         by = {c: id_agreement(con, c) for c in group_by}
         report = {
@@ -430,7 +432,7 @@ def main() -> None:
         "--group-by",
         action="append",
         metavar="COL",
-        help=f"ID agreement slice, repeatable (default: {' '.join(SLICES)}); '' for none",
+        help=f"ID agreement breakdown column, repeatable (default: {' '.join(BREAKDOWNS)}); '' for none",
     )
     ap.add_argument(
         "--stage",
@@ -446,7 +448,7 @@ def main() -> None:
     ap.add_argument("--blocking-threshold", type=float, default=THRESHOLDS["blocking"])
     ap.add_argument("--match-threshold", type=float, default=THRESHOLDS["scores"])
     args = ap.parse_args()
-    group_by = SLICES if args.group_by is None else [c for c in args.group_by if c]
+    group_by = BREAKDOWNS if args.group_by is None else [c for c in args.group_by if c]
     thresholds = {"blocking": args.blocking_threshold, "scores": args.match_threshold}
     report = compare(
         args.a_run,
