@@ -17,26 +17,20 @@ uv run --with pytest --with duckdb pytest parity/
 
 ## Example commands
 
-Placeholders are in capitals. Start a Scala run; its run folder is `<outputPath>/<runId>`. A Python run has no `runId`; its `outputPath` is the run folder.
+Placeholders are in capitals. Start a Scala run, passing these arguments plus the job's usual input, baseline and model arguments; its run folder is `<outputPath>/<runId>`. A Python run has no `runId`; its `outputPath` is the run folder.
 
 ```bash
 aws glue start-job-run --job-name SCALA_JOB \
-    --arguments '{"--runId":"noise-1","--outputPath":"s3://BUCKET/parity","--outputDebug":"true"}'
-```
-
-Scala noise floor: start two Scala runs on the same input (`noise-1`, `noise-2`), then compare them. Python's differences from Scala only mean something next to this.
-
-```bash
-uv run parity/compare.py s3://BUCKET/parity/noise-1 s3://BUCKET/parity/noise-2
+    --arguments '{"--runId":"scala-1","--outputPath":"s3://BUCKET/parity","--outputDebug":"true"}'
 ```
 
 One stage at a time: copy a Scala run's earlier stage outputs into a new run folder, run only the next stage there, and compare.
 
 ```bash
 for f in candidates baseline embeddings; do
-    aws s3 cp --recursive s3://BUCKET/parity/noise-1/$f s3://BUCKET/parity/py-1/$f
+    aws s3 cp --recursive s3://BUCKET/parity/scala-1/$f s3://BUCKET/parity/py-1/$f
 done
 aws glue start-job-run --job-name PYTHON_JOB \
     --arguments '{"--outputPath":"s3://BUCKET/parity/py-1","--stages":"matching,assignid","--outputDebug":"true"}'
-uv run parity/compare.py s3://BUCKET/parity/noise-1 s3://BUCKET/parity/py-1
+uv run parity/compare.py s3://BUCKET/parity/scala-1 s3://BUCKET/parity/py-1
 ```
