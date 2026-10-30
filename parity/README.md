@@ -2,12 +2,12 @@
 
 Compares two matcher runs on the same input and prints where they differ, for people evaluating the Scala-to-Python port ([#1](https://github.com/OvertureMaps/matchers/issues/1)). It lives outside the `overture_matchers` package and is deleted once the migration is confirmed.
 
-`compare.py A_RUN B_RUN` prints JSON with two parts:
+`compare.py path/to/run/folder_A path/to/run/folder_B` prints JSON with two parts:
 
 - `ids`: the share of candidate records that get the same ID in both runs, overall and broken down by country and by match type. New IDs are random, so two new IDs count as the same when they cover the same records.
 - `groups`: pairs of records grouped together in each run, and the share of each run's pairs the other run also has.
 
-It is a [uv script](https://docs.astral.sh/uv/guides/scripts/) with inline dependencies. Run folders keep Scala's layout, `<run folder>/<stage output>/type=<table>/`, and runs need `outputDebug=true`. Both runs must use the same model version.
+It is a [uv script](https://docs.astral.sh/uv/guides/scripts/) with inline dependencies. Run folders are in the layout defined by the Scala code, `<run folder>/<stage output>/type=<feature_type>/`, and runs need `outputDebug=true`. Both runs must use the same model version.
 
 CI doesn't run the tests. Run them by hand from the repo root; they use local fixtures and no AWS:
 
