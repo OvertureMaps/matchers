@@ -6,26 +6,19 @@
 # ///
 """Compare two matcher runs on the same input and print where they differ, as JSON.
 
-A run is a run folder in Scala's stage layout, `<run>/<folder>/type=<table>/`.
-Run A is the reference, run B the run under test. The report holds numbers for
-a human to read, not a pass or fail verdict. Without `--stage`, it holds three
-agreement metrics, which need the assignid stage's debug outputs
-(`outputDebug=true`):
+A run is a run folder in Scala's stage layout, `<run>/<folder>/type=<table>/`,
+written with `outputDebug=true`. Run A is the reference, run B the run being
+checked. The report holds numbers for a person to read, not a pass or fail
+verdict:
 
-  id       share of candidates with the same outcome: the same reused ID, or both
-           minted a new ID for the same set of candidates. Overall and broken
-           down by country and match type.
-  cluster  pairwise precision and recall of "same cluster". Cluster IDs are
-           arbitrary, so only membership is compared.
-  edge     precision and recall of accepted pairs, a diagnostic.
+  ids     share of candidate records that get the same ID in both runs, overall
+          and broken down by country and by match type. New IDs are random, so
+          two new IDs count as the same when they cover the same records.
+  groups  how far the runs agree on which records belong together. Group IDs
+          are arbitrary, so the report counts pairs of records grouped together
+          in each run, and the share of each run's pairs the other run also has.
 
-`--stage setup|matching` instead diffs one stage's outputs: row keys, columns
-(numbers within `--tolerance`), and score flips across the blocking and match
-thresholds with their distance to the threshold. `--stage matching` adds the
-cluster and edge metrics. Use it in mixed mode, where run B ran one stage on a
-copy of run A's earlier outputs.
-
-    uv run parity/compare.py A_RUN B_RUN [--table place] [--group-by country] [--stage matching]
+    uv run parity/compare.py A_RUN B_RUN [--table place]
 
 Runs are local folders or s3:// URIs; S3 credentials come from the AWS config
 chain, so AWS_PROFILE applies. Both runs must use the same model version.
@@ -36,39 +29,8 @@ import json
 
 import duckdb
 
-# Output folders each stage writes, in stage order. launch.py seeds mixed-mode
-# run folders from this.
-STAGE_OUTPUTS = {
-    "setup": ["candidates", "baseline", "embeddings"],
-    "matching": ["blocking", "scores", "matches_validated", "matches"],
-    "assignid": ["idMap", "final", "fallout"],
-    "metrics": ["metrics"],
-}
-# The unioned matcher pairs candidates and baseline in both directions, and an ID
-# can sit on both sides, so the record types are part of a pair's key.
-PAIR_KEY = ["id", "record_type", "base_id", "base_record_type"]
-# Row keys of the outputs `--stage` diffs column by column.
-DIFF_KEYS = {
-    "candidates": ["id"],
-    "baseline": ["id"],
-    "blocking": PAIR_KEY,
-    "scores": PAIR_KEY,
-    "matches_validated": PAIR_KEY,
-}
-# Places model thresholds per output folder. Scala persists no blocking score,
-# so blocking flips appear only when both runs write `composite_score` there.
-THRESHOLDS = {"blocking": 0.08, "scores": 0.48}
-BREAKDOWNS = ["country", "match_sub_type"]
-NUMERIC_TYPES = {
-    "TINYINT",
-    "SMALLINT",
-    "INTEGER",
-    "BIGINT",
-    "HUGEINT",
-    "FLOAT",
-    "DOUBLE",
-}
-MAX_EXAMPLES = 10
+# Report key to the column it breaks ID agreement down by.
+BREAKDOWNS = {"by_country": "country", "by_match_type": "match_sub_type"}
 
 
 def scan(run: str, folder: str, table: str) -> str:
@@ -87,37 +49,32 @@ def scan(run: str, folder: str, table: str) -> str:
     return f"read_parquet('{path}', union_by_name=true, hive_partitioning=false)"
 
 
-def ratio(num: int, den: int) -> float:
+def share(num: int, den: int) -> float:
     """Return num / den, or 1.0 when there is nothing to compare."""
     return num / den if den else 1.0
 
 
 def load_ids(con: duckdb.DuckDBPyConnection, tag: str, run: str, table: str) -> None:
-    """Create the `<tag>_ids` view: each candidate's assigned ID and its co-members."""
+    """Create the `<tag>_ids` view: each candidate's ID and the records sharing it."""
     con.execute(f"""
         CREATE VIEW {tag}_ids AS
         WITH m AS (SELECT DISTINCT id, assigned_id FROM {scan(run, "idMap", table)})
         SELECT id, assigned_id,
                assigned_id IN (SELECT id FROM {scan(run, "baseline", table)}) AS reused,
-               -- simplification: an XOR of member hashes stands for the member set.
-               bit_xor(hash(id)) OVER (PARTITION BY assigned_id) AS members
+               -- simplification: an XOR of record hashes stands for the record set.
+               bit_xor(hash(id)) OVER (PARTITION BY assigned_id) AS sharing
         FROM m
     """)
 
 
-def load_clusters(
-    con: duckdb.DuckDBPyConnection, tag: str, run: str, table: str
-) -> None:
-    """Create the `<tag>_members` (entity, cluster) and `<tag>_edges` views from `matches`."""
+def load_groups(con: duckdb.DuckDBPyConnection, tag: str, run: str, table: str) -> None:
+    """Create the `<tag>_groups` view: (record, group) rows from `matches`."""
     matches = scan(run, "matches", table)
     con.execute(f"""
-        CREATE VIEW {tag}_members AS
+        CREATE VIEW {tag}_groups AS
         SELECT id, cluster_id FROM {matches}
         UNION
-        SELECT base_id, cluster_id FROM {matches} WHERE base_id IS NOT NULL;
-        CREATE VIEW {tag}_edges AS
-        SELECT DISTINCT least(id, base_id) AS u, greatest(id, base_id) AS v
-        FROM {matches} WHERE match_type = 'match' AND base_id IS NOT NULL;
+        SELECT base_id, cluster_id FROM {matches} WHERE base_id IS NOT NULL
     """)
 
 
@@ -142,225 +99,56 @@ def load_breakdowns(con: duckdb.DuckDBPyConnection, run: str, table: str) -> Non
     """)
 
 
-def id_agreement(con: duckdb.DuckDBPyConnection, by: str | None = None) -> list[dict]:
-    """ID agreement over the union of both runs' candidates, largest group first.
+def same_ids(con: duckdb.DuckDBPyConnection, by: str | None = None) -> list[tuple]:
+    """Share of candidates with the same ID in both runs, largest group first.
 
-    A candidate missing from either run's idMap counts as a disagreement.
+    A candidate missing from either run's idMap counts as different.
 
     Args:
         con: Connection holding the `a_ids`, `b_ids` and `breakdowns` views.
-        by: `breakdowns` column to group by, or None for the overall figure.
+        by: `breakdowns` column to group by, or None for all candidates.
 
     Returns:
-        One `{"value", "n", "agreement"}` dict per group.
+        One `(value, records, same_id_share)` row per group.
     """
     grp, join = "NULL", ""
     if by:
         grp = "s.grp"
         join = f'LEFT JOIN (SELECT id, any_value("{by}") AS grp FROM breakdowns GROUP BY id) s USING (id)'
-    rows = con.execute(f"""
-        SELECT {grp} AS value, count(*) AS n,
+    return con.execute(f"""
+        SELECT {grp}, count(*),
                avg(CAST(coalesce(CASE
                    WHEN a.reused AND b.reused THEN a.assigned_id = b.assigned_id
-                   WHEN NOT a.reused AND NOT b.reused THEN a.members = b.members
-                   ELSE false END, false) AS INT)) AS agreement
+                   WHEN NOT a.reused AND NOT b.reused THEN a.sharing = b.sharing
+                   ELSE false END, false) AS INT))
         FROM a_ids a FULL JOIN b_ids b USING (id) {join}
-        GROUP BY ALL ORDER BY n DESC, value
+        GROUP BY ALL ORDER BY 2 DESC, 1
     """).fetchall()
-    return [{"value": v, "n": n, "agreement": ag} for v, n, ag in rows]
 
 
-def cluster_agreement(con: duckdb.DuckDBPyConnection) -> dict:
-    """Pairwise precision and recall of "same cluster" over entities in both runs.
-
-    Precision is the share of B's same-cluster pairs that A confirms; recall is
-    the share of A's pairs that B keeps.
-    """
-    pairs_a, pairs_b, shared, n = con.execute("""
+def same_groups(con: duckdb.DuckDBPyConnection) -> dict:
+    """Pairs of records grouped together in each run, over records in both runs."""
+    in_a, in_b, in_both, n = con.execute("""
         WITH j AS (
-            SELECT a.cluster_id AS ca, b.cluster_id AS cb
-            FROM a_members a JOIN b_members b USING (id)
+            SELECT a.cluster_id AS ga, b.cluster_id AS gb
+            FROM a_groups a JOIN b_groups b USING (id)
         ),
-        p AS (SELECT count(*) AS k FROM j GROUP BY ca, cb),
-        pa AS (SELECT count(*) AS k FROM j GROUP BY ca),
-        pb AS (SELECT count(*) AS k FROM j GROUP BY cb)
-        SELECT (SELECT coalesce(sum(k * (k - 1) // 2), 0) FROM pa),
-               (SELECT coalesce(sum(k * (k - 1) // 2), 0) FROM pb),
-               (SELECT coalesce(sum(k * (k - 1) // 2), 0) FROM p),
+        both_ AS (SELECT count(*) AS k FROM j GROUP BY ga, gb),
+        a AS (SELECT count(*) AS k FROM j GROUP BY ga),
+        b AS (SELECT count(*) AS k FROM j GROUP BY gb)
+        SELECT (SELECT coalesce(sum(k * (k - 1) // 2), 0) FROM a),
+               (SELECT coalesce(sum(k * (k - 1) // 2), 0) FROM b),
+               (SELECT coalesce(sum(k * (k - 1) // 2), 0) FROM both_),
                (SELECT count(*) FROM j)
     """).fetchone()
     return {
-        "entities_compared": n,
-        "pairs_a": pairs_a,
-        "pairs_b": pairs_b,
-        "precision": ratio(shared, pairs_b),
-        "recall": ratio(shared, pairs_a),
+        "records_in_both_runs": n,
+        "pairs_grouped_together_in_a": in_a,
+        "pairs_grouped_together_in_b": in_b,
+        "pairs_grouped_together_in_both": in_both,
+        "share_of_a_pairs_also_in_b": share(in_both, in_a),
+        "share_of_b_pairs_also_in_a": share(in_both, in_b),
     }
-
-
-def edge_agreement(con: duckdb.DuckDBPyConnection) -> dict:
-    """Precision and recall of accepted pairs, regardless of pair orientation."""
-    na, nb, both = con.execute("""
-        SELECT (SELECT count(*) FROM a_edges), (SELECT count(*) FROM b_edges),
-               (SELECT count(*) FROM a_edges JOIN b_edges USING (u, v))
-    """).fetchone()
-    return {
-        "edges_a": na,
-        "edges_b": nb,
-        "precision": ratio(both, nb),
-        "recall": ratio(both, na),
-    }
-
-
-def column_types(con: duckdb.DuckDBPyConnection, view: str) -> dict[str, str]:
-    """Column name to DuckDB type, for a view."""
-    return dict(
-        con.execute(
-            f"SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM {view})"
-        ).fetchall()
-    )
-
-
-def is_numeric(column_type: str) -> bool:
-    """Whether a DuckDB type is compared within the tolerance."""
-    return column_type in NUMERIC_TYPES or column_type.startswith(("DECIMAL", "U"))
-
-
-def mismatch_sql(
-    col: str, type_a: str, type_b: str, tolerance: float
-) -> tuple[str, str | None]:
-    """SQL for "the two sides differ" and, for numbers, for their largest absolute gap."""
-    a, b = f'a."{col}"', f'b."{col}"'
-    if is_numeric(type_a) and is_numeric(type_b):
-        gap = f"abs({a}::DOUBLE - {b}::DOUBLE)"
-        return (
-            f"{a} IS DISTINCT FROM {b} AND NOT coalesce({gap} <= {tolerance}, false)",
-            f"max({gap})",
-        )
-    if type_a != type_b:
-        a, b = f"{a}::VARCHAR", f"{b}::VARCHAR"
-    return f"{a} IS DISTINCT FROM {b}", None
-
-
-def diff_table(
-    con: duckdb.DuckDBPyConnection, folder: str, key: list[str], tolerance: float
-) -> dict:
-    """Diff one output folder of runs A and B, joined on `key`.
-
-    Args:
-        con: Connection holding the `a_<folder>` and `b_<folder>` views.
-        folder: Stage output folder.
-        key: Row key columns.
-        tolerance: Largest absolute difference at which numbers still agree.
-
-    Returns:
-        Row and key counts, columns present on one side only, columns whose type
-        differs, and for each shared column with mismatches the number of
-        mismatched rows (plus the largest gap for numbers).
-    """
-    a, b = f"a_{folder}", f"b_{folder}"
-    types_a, types_b = column_types(con, a), column_types(con, b)
-    keys = ", ".join(f'"{k}"' for k in key)
-    rows_a, rows_b, dup_a, dup_b, only_a, only_b, both = con.execute(f"""
-        SELECT (SELECT count(*) FROM {a}), (SELECT count(*) FROM {b}),
-               (SELECT count(*) - count(DISTINCT ({keys})) FROM {a}),
-               (SELECT count(*) - count(DISTINCT ({keys})) FROM {b}),
-               (SELECT count(*) FROM {a} ANTI JOIN {b} USING ({keys})),
-               (SELECT count(*) FROM {b} ANTI JOIN {a} USING ({keys})),
-               (SELECT count(*) FROM {a} JOIN {b} USING ({keys}))
-    """).fetchone()
-    shared = [c for c in types_a if c in types_b and c not in key]
-    mismatches = {}
-    for c in shared:
-        differs, gap = mismatch_sql(c, types_a[c], types_b[c], tolerance)
-        n, max_gap = con.execute(f"""
-            SELECT count(*) FILTER (WHERE {differs}), {gap or "NULL"}
-            FROM {a} a JOIN {b} b USING ({keys})
-        """).fetchone()
-        if n:
-            mismatches[c] = {"n": n} | ({"max_abs_diff": max_gap} if gap else {})
-    return {
-        "rows_a": rows_a,
-        "rows_b": rows_b,
-        "duplicate_keys_a": dup_a,
-        "duplicate_keys_b": dup_b,
-        "keys_only_a": only_a,
-        "keys_only_b": only_b,
-        "keys_both": both,
-        "columns_only_a": sorted(set(types_a) - set(types_b)),
-        "columns_only_b": sorted(set(types_b) - set(types_a)),
-        "column_types_differ": {
-            c: [types_a[c], types_b[c]] for c in shared if types_a[c] != types_b[c]
-        },
-        "mismatches": mismatches,
-    }
-
-
-def score_flips(
-    con: duckdb.DuckDBPyConnection, folder: str, threshold: float
-) -> dict | None:
-    """Pairs whose `composite_score` lands on different sides of `threshold`.
-
-    A flip's distance is how far the farther of its two scores sits from the
-    threshold: near zero is float noise, far from it is a real difference.
-
-    Returns:
-        The flip count, the largest distance and the farthest flips, or None
-        when either run lacks `composite_score`.
-    """
-    a, b = f"a_{folder}", f"b_{folder}"
-    if not all("composite_score" in column_types(con, v) for v in (a, b)):
-        return None
-    keys = ", ".join(PAIR_KEY)
-    rows = con.execute(f"""
-        WITH s AS (
-            SELECT {keys}, a.composite_score::DOUBLE AS sa, b.composite_score::DOUBLE AS sb
-            FROM {a} a JOIN {b} b USING ({keys})
-        )
-        SELECT {keys}, sa, sb, greatest(abs(sa - {threshold}), abs(sb - {threshold})) AS distance,
-               count(*) OVER () AS n
-        FROM s
-        WHERE (sa >= {threshold}) IS DISTINCT FROM (sb >= {threshold})
-        ORDER BY distance DESC, {keys}
-        LIMIT {MAX_EXAMPLES}
-    """).fetchall()
-    return {
-        "threshold": threshold,
-        "n": rows[0][-1] if rows else 0,
-        "max_distance": rows[0][-2] if rows else None,
-        "examples": [
-            dict(
-                zip([*PAIR_KEY, "score_a", "score_b", "distance"], r[:-1], strict=True)
-            )
-            for r in rows
-        ],
-    }
-
-
-def diff_stage(
-    con: duckdb.DuckDBPyConnection,
-    runs: dict[str, str],
-    stage: str,
-    table: str,
-    tolerance: float,
-    thresholds: dict[str, float],
-) -> dict:
-    """Diff every keyed output folder of one stage; see `diff_table` and `score_flips`.
-
-    `runs` maps the view prefixes `a` and `b` to run folders.
-    """
-    report = {}
-    for folder in STAGE_OUTPUTS[stage]:
-        if folder not in DIFF_KEYS:
-            continue
-        for tag, run in runs.items():
-            con.execute(
-                f"CREATE VIEW {tag}_{folder} AS SELECT * FROM {scan(run, folder, table)}"
-            )
-        report[folder] = diff_table(con, folder, DIFF_KEYS[folder], tolerance)
-        if folder in thresholds:
-            report[folder]["flips"] = score_flips(con, folder, thresholds[folder])
-    return report
 
 
 def connect(*runs: str) -> duckdb.DuckDBPyConnection:
@@ -373,49 +161,30 @@ def connect(*runs: str) -> duckdb.DuckDBPyConnection:
     return con
 
 
-def compare(
-    a_run: str,
-    b_run: str,
-    table: str = "place",
-    group_by: list[str] = BREAKDOWNS,
-    stage: str | None = None,
-    tolerance: float = 1e-6,
-    thresholds: dict[str, float] = THRESHOLDS,
-) -> dict:
+def compare(a_run: str, b_run: str, table: str = "place") -> dict:
     """Compare run B against reference run A.
 
     Args:
         a_run: Reference run folder.
-        b_run: Run folder under test.
+        b_run: Run folder being checked.
         table: Value of the `type=` partition to compare.
-        group_by: Columns to break ID agreement down by: columns of A's
-            candidates, or `match_sub_type`.
-        stage: Diff this stage's outputs instead of computing the agreement metrics.
-        tolerance: Largest absolute difference at which numbers agree (`stage` only).
-        thresholds: Score threshold per output folder (`stage` only).
 
     Returns:
         The report the command line prints.
     """
     runs = {"a": a_run, "b": b_run}
     con = connect(*runs.values())
-    if stage:
-        tables = diff_stage(con, runs, stage, table, tolerance, thresholds)
-        report = {"stage": stage, "tables": tables}
-        if stage != "matching":
-            return report
-    else:
-        for tag, run in runs.items():
-            load_ids(con, tag, run, table)
-        load_breakdowns(con, a_run, table)
-        overall = id_agreement(con)[0]
-        by = {c: id_agreement(con, c) for c in group_by}
-        report = {
-            "id": {"n": overall["n"], "agreement": overall["agreement"], "by": by}
-        }
     for tag, run in runs.items():
-        load_clusters(con, tag, run, table)
-    return report | {"cluster": cluster_agreement(con), "edge": edge_agreement(con)}
+        load_ids(con, tag, run, table)
+        load_groups(con, tag, run, table)
+    load_breakdowns(con, a_run, table)
+    _, records, same = same_ids(con)[0]
+    ids = {"records": records, "same_id_share": same}
+    for key, col in BREAKDOWNS.items():
+        ids[key] = [
+            {col: v, "records": n, "same_id_share": s} for v, n, s in same_ids(con, col)
+        ]
+    return {"ids": ids, "groups": same_groups(con)}
 
 
 def main() -> None:
@@ -424,42 +193,12 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("a_run", help="reference run folder (local, s3:// or s3a://)")
-    ap.add_argument("b_run", help="run folder under test")
+    ap.add_argument("b_run", help="run folder being checked")
     ap.add_argument(
         "--table", default="place", help="value of the type= partition (default: place)"
     )
-    ap.add_argument(
-        "--group-by",
-        action="append",
-        metavar="COL",
-        help=f"ID agreement breakdown column, repeatable (default: {' '.join(BREAKDOWNS)}); '' for none",
-    )
-    ap.add_argument(
-        "--stage",
-        choices=["setup", "matching"],
-        help="diff this stage's outputs instead",
-    )
-    ap.add_argument(
-        "--tolerance",
-        type=float,
-        default=1e-6,
-        help="numeric tolerance for --stage (default: 1e-6)",
-    )
-    ap.add_argument("--blocking-threshold", type=float, default=THRESHOLDS["blocking"])
-    ap.add_argument("--match-threshold", type=float, default=THRESHOLDS["scores"])
     args = ap.parse_args()
-    group_by = BREAKDOWNS if args.group_by is None else [c for c in args.group_by if c]
-    thresholds = {"blocking": args.blocking_threshold, "scores": args.match_threshold}
-    report = compare(
-        args.a_run,
-        args.b_run,
-        args.table,
-        group_by,
-        args.stage,
-        args.tolerance,
-        thresholds,
-    )
-    print(json.dumps(report, indent=2))
+    print(json.dumps(compare(args.a_run, args.b_run, args.table), indent=2))
 
 
 if __name__ == "__main__":
