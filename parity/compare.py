@@ -6,10 +6,9 @@
 # ///
 """Compare two matcher runs on the same input and print where they differ, as JSON.
 
-A run is a run folder in Scala's stage layout, `<run>/<folder>/type=<table>/`,
-written with `outputDebug=true`. Run A is the reference, run B the run being
-checked. The report holds numbers for a person to read, not a pass or fail
-verdict:
+A_RUN (usually Scala) and B_RUN (usually Python) are the folders a run writes
+its stage outputs to, laid out as `<stage output>/type=<table>/`. Both runs
+need `outputDebug=true` for the ID map. The report has two parts:
 
   ids     share of candidate records that get the same ID in both runs, overall
           and broken down by country and by match type. New IDs are random, so

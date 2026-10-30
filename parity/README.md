@@ -2,7 +2,7 @@
 
 Compares two matcher runs on the same input and prints where they differ, for people evaluating the Scala-to-Python port ([#1](https://github.com/OvertureMaps/matchers/issues/1)). It lives outside the `overture_matchers` package and is deleted once the migration is confirmed.
 
-`compare.py A_RUN B_RUN` prints JSON for a person to read, with no pass or fail verdict:
+`compare.py A_RUN B_RUN` prints JSON with two parts:
 
 - `ids`: the share of candidate records that get the same ID in both runs, overall and broken down by country and by match type. New IDs are random, so two new IDs count as the same when they cover the same records.
 - `groups`: pairs of records grouped together in each run, and the share of each run's pairs the other run also has.
