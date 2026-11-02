@@ -1,15 +1,18 @@
 # Python migration plan
 
-Design for porting the matchers (places, divisions, addresses) from OvertureMaps/overture-matchers (Scala) to Python/PySpark in this repo. Tracked in #1. The evaluation behind it, with benchmarks, is in OvertureMaps/overture-matchers#455.
+This document outlines the design for porting the matchers (places, divisions, addresses) from OvertureMaps/overture-matchers (Scala) to Python/PySpark in this repo. The evaluation behind it, with benchmarks, is in OvertureMaps/overture-matchers#455.
+
+This final major section of this document is titled "Details for agents" -- as the name implies, it contains lower-level implementation details that I didn't think were important enough to include in the following design notes.
 
 ## Goal and constraints
 
-- Port the pipeline to Python/PySpark and use the port to clean up the structure.
-- Final matching outputs stay close to Scala's. The parity harness reports the differences, and people review them (see Parity below). Exact parity is not required (but it would be nice).
+- To port the pipeline to Python/PySpark -- and take the opportunity to clean up the code's structure.
+- The matching's final output should stay as close to Scala's as is reasonably possible. This can be verified by running the parity harness (see Parity below). Exact parity is not required (but it would be nice).
 - Production runs on AWS Glue 5 (Spark 3.5, Python 3.11), launched by the places match DAG in tf-data-platform.
-- Follow Overture conventions in the code: MIT header and a one-paragraph purpose on every file, real docstrings on public functions, DCO sign-off (`git commit -s`), `python:X.Y-slim` images with uv from a pinned `ghcr.io/astral-sh/uv` stage.
 
 ## Current system (Scala), in brief
+
+This is just a summary of how the Scala matching works today:
 
 - `Main` runs four stages chosen by `--stages`: setup, matching, assignid, metrics. Stages hand off only through folders under the run's S3 output path (`candidates/`, `baseline/`, `matches/`, `final/`, `fallout/`, `metrics/`).
 - Each stage calls the slots of a `Theme` (Transformer, HistoryFilter, EmbeddingsGenerator, Matcher, IdAssignmentPipeline). The config JSON in `resources/configs/` picks each slot's class.
@@ -33,14 +36,14 @@ At a high level, I'd like to remove the class structure entirely:
   * Each stage writes to separate subfolders within a `Bundle`. I did consider using separate bundles, but matching is typically run all-at-once, and the metadata.json gets needlessly messy if everything is in its own bundle. I think that, in general, 1 DAG run ~ 1 Bundle (lmk if you disagree)
 * Each stage is a DAG (not an Airflow DAG, just a DAG) of *steps*
   * Each step is a `DataFrame`->`DataFrame` transformation.
-  * Steps chain together with `df.transform`, e.g. `df.transform(spatial_pairs, radius_m=400)`
+  * Steps chain together with `df.transform` when possible, e.g. `df.transform(spatial_pairs, radius_m=400)`
 * `RunConfig` is still serialized into JSON, but it lives in-memory as a frozen dataclass.
   * The `RunConfig` object is built from the job params during pre-setup, then written to JSON at `s3://.../<run>/config.json`. Subsequent stages initialize the config object from that JSON.
   * `config.json` is stamped into the bundle's `metadata.json` before finalization.
 
 Each step is I/O-free and free for Spark's optimization to muck around with. When a step takes several DataFrames, it is a plain call instead of `df.transform`.
 
-`RunConfig` lives on each stage's Spark driver. Executors never receive it; steps get plain values from it. Pre-setup is the start of the first stage, before it reads anything. A later stage whose params (other than `stages`) disagree with `config.json` fails. While a run mixes Scala and Python stages, a Scala setup writes no `config.json`, so the first Python stage finds none and writes it.
+`RunConfig` exists only in the Python process that drives each stage (the Spark driver). Executors get plain values from it, never the object. Setup writes `config.json` before it reads any input. Later stages load `RunConfig` from that file and fail if their own params (other than `stages`) differ from it, so settings can't change partway through a run. While Scala and Python stages are mixed, a Scala setup writes no `config.json`, so the first Python stage builds `RunConfig` from its params and writes the file.
 
 The job knows nothing about bundles: it takes the bundle's base URI as `outputPath` and writes stage outputs as subdirectories under it. It also has no `runId`: this is included in the regular `outputPath` of the job (organizational logic stays out of the package). The DAG calls `bundle.initialize(...)` before the first stage; after the last stage, it reads `config.json`, adds it to the metadata under `matcher` and calls `bundle.finalize()`.
 
@@ -185,6 +188,7 @@ Implementation details behind the design above.
 - Scala's `<outputPath>/<runId>` becomes the Python job's `outputPath`, so both write the same run folder layout.
 - The DAG is the only writer of `metadata.json`, because `Metadata` keys its sections by the Airflow `dag_id` and rewrites the whole file on every update. Downstream DAGs list the match bundle as an input, which carries its metadata forward.
 - `THEMES` is the only place the code branches on theme. Places conflation, baseline conflation and linkage (the three modes in OvertureMaps/overture-matchers#431) are three match functions over the same building blocks that differ in pair kinds and resolver.
+- Follow Overture conventions in the code: MIT header and a one-paragraph purpose on every file, real docstrings on public functions, DCO sign-off (`git commit -s`), `python:X.Y-slim` images with uv from a pinned `ghcr.io/astral-sh/uv` stage.
 
 ### Rules
 
