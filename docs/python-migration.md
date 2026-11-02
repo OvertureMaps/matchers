@@ -78,7 +78,7 @@ Each theme is one module (`places.py`, later `divisions.py` and `addresses.py`) 
 
 `THEMES` in `stages.py` maps the theme name to its module. Themes don't share a fixed sequence of transformations: Addresses runs two tiers and a top-50 cut. Divisions applies per-subtype thresholds and greedy selection, etc.
 
-Scala's theme config JSON mostly wires classes by name, which plain functions make unnecessary. The remaining settings fall into two categories, roughly: run settings (`outputDebug`, `matchHistory`), which become fields in `RunConfig`, and theme constants (table name, ID generator) -- which are just constants in the theme module. The job includes an `overrideConfigPath` option which the DAG should usually set to `None`.
+Scala's theme config JSON mostly wires classes by name, which plain functions make unnecessary. The remaining settings fall into two categories, roughly: run settings (`outputDebug`, `matchHistory`), which become fields in `RunConfig`, and theme constants (table name, ID generator) -- which are just constants in the theme module. With no config JSON left, there is nothing for `overrideConfigPath` to override, so the job has no such param.
 
 The production job is `MatchJob`, a subclass of overture-core's `SparkSedonaJob`, launched from tf-data-platform like the other Overture Spark jobs. Its params use Scala's argument names. `execute_job` builds or loads `RunConfig` (see above) and runs the stages named in `stages`. Locally, a developer runs the same job with `MatchJob().run(params)` on a local SparkSession, pointing `outputPath` at a local directory and the inputs at the test fixtures.
 
@@ -237,6 +237,7 @@ Harness layout: `parity/` sits outside `packages/`, so nothing in it ships to Py
 ### tf-data-platform DAG changes
 
 - params drop the leading dashes (`outputPath`, not `--outputPath`): a Python job receives its params as one JSON object, and `SparkSedonaJob.get_param` looks up bare names
+- the DAG stops sending `overrideConfigPath`, which it always set to `none`
 - the job's extra jars are GraphFrames (shaded into the Scala jar today), the `PlaceTextNormalizer` jar, and spark-nlp for divisions. jpostal and libphonenumber drop out: Sedona 1.8.0 ships jpostal, and phones use `phonenumbers`
 - libpostal model data: the Scala job receives it as a Glue extra file, which works only because a JVM job's params pass through as Glue arguments, and a Python job's params do not. Instead, the v1.0.0 model data sits unpacked under an S3 prefix, the job's Spark conf sets `spark.sedona.libpostal.dataDir` to it, and setup calls `sc.addFile(<prefix>, recursive=True)`, Sedona's documented mode for remote data. The `.so` files drop out
 - the DAG stops reading the job's `outputResultFile`. The final path is fixed by the layout (`<outputPath>/final/type=<table>/`), so the DAG builds the `{"<table>": "<path>"}` map itself. `MatchJob` writes no result file and ignores an `outputResultFile` param, so cloned Scala arguments still run
