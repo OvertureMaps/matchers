@@ -26,7 +26,7 @@ On push to `main`, [`publish_packages.yml`](.github/workflows/publish_packages.y
 2. `build`, with no secrets, builds only if this run's `release` job released the package: `uv build`, then `twine check --strict`, then upload `dist/` as an artifact.
 3. `publish`, with only `id-token: write`, uploads the artifact to PyPI by trusted publishing and skips versions already there.
 
-If publishing fails after the tag is pushed, that version stays unpublished, and the next release supersedes it. A re-run doesn't recover it: the release job finds no new commits, and a re-run attempt can't see the earlier attempt's release marker. Don't delete the tag or GitHub Release: with [immutable releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases) the tag name can't be reused.
+If publishing fails after the tag is pushed, that version stays unpublished, and the next release supersedes it. A re-run doesn't recover it: the release job finds no new commits, and a re-run attempt can't see the earlier attempt's release marker. Don't delete the tag or GitHub Release: this repo uses [immutable releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases), so the tag can't be deleted while its release exists and its name can't be reused.
 
 A manual run (`workflow_dispatch`) is a smoke test: no tag or release, every package builds from its current state and publishes to [Test PyPI](https://test.pypi.org/).
 
