@@ -38,11 +38,11 @@ At a high level, I'd like to remove the class structure entirely:
   * The `RunConfig` object is built from the job params during pre-setup, then written to JSON at `s3://.../<run>/config.json`. Subsequent stages initialize the config object from that JSON.
   * `config.json` is stamped into the bundle's `metadata.json` before finalization.
 
-Steps do no I/O, so Spark evaluates them lazily and nothing executes until the stage writes. When a step takes several DataFrames, it is a plain call instead of `df.transform`.
+Each step is I/O-free and free for Spark's optimization to muck around with. When a step takes several DataFrames, it is a plain call instead of `df.transform`.
 
 `RunConfig` lives on each stage's Spark driver. Executors never receive it; steps get plain values from it. Pre-setup is the start of the first stage, before it reads anything. A later stage whose params (other than `stages`) disagree with `config.json` fails. While a run mixes Scala and Python stages, a Scala setup writes no `config.json`, so the first Python stage finds none and writes it.
 
-The job knows nothing about bundles: it takes the bundle's base URI as `outputPath` and writes stage outputs as subdirectories under it. It has no `runId`: Scala's `<outputPath>/<runId>` becomes the Python job's `outputPath`, so both write the same run folder layout. The DAG is the only writer of `metadata.json`, because `Metadata` keys its sections by the Airflow `dag_id` and rewrites the whole file on every update. It calls `bundle.initialize(...)` before the first stage; after the last stage, it reads `config.json`, adds it to the metadata under `matcher` and calls `bundle.finalize()`. Downstream DAGs list the match bundle as an input, which carries its metadata forward.
+The job knows nothing about bundles: it takes the bundle's base URI as `outputPath` and writes stage outputs as subdirectories under it. It also has no `runId`: this is included in the regular `outputPath` of the job (organizational logic stays out of the package). The DAG calls `bundle.initialize(...)` before the first stage; after the last stage, it reads `config.json`, adds it to the metadata under `matcher` and calls `bundle.finalize()`.
 
 Some pseudocode outlining some of this:
 
@@ -76,9 +76,9 @@ def matching_stage(cfg: RunConfig) -> None:
 
 Each theme is one module (`places.py`, later `divisions.py` and `addresses.py`) with one function per stage: `setup`, `match`, `assign_ids` and `metrics`. These stages are built from shared transformation functions when possible.
 
-`THEMES` in `stages.py` maps the theme name to its module, the only place the code branches on theme. Themes don't share a fixed sequence of transformations. Addresses runs two tiers and a top-50 cut. Divisions applies per-subtype thresholds and greedy selection. Places conflation, baseline conflation and linkage (the three modes in OvertureMaps/overture-matchers#431) are three match functions over the same building blocks that differ in pair kinds and resolver.
+`THEMES` in `stages.py` maps the theme name to its module. Themes don't share a fixed sequence of transformations: Addresses runs two tiers and a top-50 cut. Divisions applies per-subtype thresholds and greedy selection, etc.
 
-Scala's theme config JSON mostly wires classes by name, which plain functions make unnecessary. What remains splits two ways: run settings (`outputDebug`, `matchHistory`) are `RunConfig` fields, and theme constants (table name, ID generator) are constants in the theme module. The DAG always passes `overrideConfigPath=none`; the job accepts that value and rejects any other.
+Scala's theme config JSON mostly wires classes by name, which plain functions make unnecessary. The remaining settings fall into two categories, roughly: run settings (`outputDebug`, `matchHistory`), which become fields in `RunConfig`, and theme constants (table name, ID generator) -- which are just constants in the theme module. The job includes an `overrideConfigPath` option which the DAG should usually set to `None`.
 
 The production job is `MatchJob`, a subclass of overture-core's `SparkSedonaJob`, launched from tf-data-platform like the other Overture Spark jobs. Its params use Scala's argument names. `execute_job` builds or loads `RunConfig` (see above) and runs the stages named in `stages`. Locally, a developer runs the same job with `MatchJob().run(params)` on a local SparkSession, pointing `outputPath` at a local directory and the inputs at the test fixtures.
 
@@ -105,22 +105,6 @@ The repo follows overture-core's `packages/` layout. When the first transformati
 
 Each package is versioned from its own `<package>-v<version>` tags through python-semantic-release and setuptools_scm, and published to public PyPI by trusted publishing, as in overture-core.
 
-Rules:
-
-- Transformation functions are pure. S3 reads and writes happen only in stage functions and in `checkpoint(df, cfg, name)`, which writes to `<run>/<name>/` and returns a read of it. That cuts the lineage, so later transformations don't recompute earlier ones and the query plan stays small. Matching checkpoints after blocking, where about 42B spatial pairs shrink to about 170M. Checkpoint outputs stay with the run. With `outputDebug` on, matching also checkpoints `matches_validated/`, as Scala does.
-- A DataFrame that two branches of one stage read gets an explicit `.cache()`. In `match_places`, candidates feed both the history pairs and the spatial union.
-- Each stage output's columns are defined by the `select` that produces it, as in Scala (the transformer's required-columns list, the `MatchResult` columns). There is no separate schema validation layer for now; schema tracking across Overture pipelines is an open, org-wide question.
-- Setup functions build one `select` from a list of column expressions. A `withColumn` chain adds one projection per column to the query plan.
-- Boosters and sketch readers load once per executor process, through module-level `functools.cache` loaders keyed by resource name (the blocking booster, the scoring booster, each sketch). The model package is installed on every worker, so UDF closures capture only the resource name, never the loaded object.
-- The model bundle is a Python package in CodeArtifact, published by tf-places-matcher-model, with the boosters, sketches and manifest as package data. The DAG installs it on every worker at a version pinned by its own Airflow Variable, and `ModelBundle` finds its files with `importlib.resources`. It is not a dependency in this repo's `pyproject.toml`, so a model release does not force a matcher release.
-- Classes hold data and resources only: `RunConfig` (frozen dataclass) and `ModelBundle`. No abstract base classes, no strategy objects, no emulation of typed Datasets.
-- Overrides and history matches are pre-matches (Scala's `preMatch`): pairs accepted before blocking, without scoring. Each theme function calls the shared overrides and history functions it uses. During the port, places calls only the history one (see traps).
-- From the matching stage, assignid reads only `matches/`, never matching's checkpoints.
-- Features live in `features.py` and run only in Spark: built-in expressions for blocking features, one UDF for pairwise features (see Performance rules). Training installs the library package alone and imports the same module, so training and inference compute features with the same code. The model bundle records the library package's version, not the matcher's, so a library release signals a possible retrain. `ModelBundle.load()` compares that version with the installed library package and fails the stage on a mismatch, so features never change under a model silently.
-- Every transformation function has unit tests on a local SparkSession with a few rows. One shared places fixture covers each path through matching: history hit, history miss across a quadkey tile edge, renamed record, candidate-candidate duplicate, deleted baseline, no match, and two baseline records with the same signature.
-- Tests never load the production model bundle, which is private. A fixture trains a tiny booster with `xgboost` and builds sketches through Spark's JVM sketch classes, both on the fixture rows.
-- The `PlaceTextNormalizer` jar is private too. Fixtures carry the normalized columns precomputed. The few tests that run the normalizer itself carry a `normalizer` marker and skip when the jar is absent; they run locally and in tf-places-matcher-model's CI.
-
 ## Library swaps
 
 | Scala dependency | Python replacement | Note |
@@ -135,17 +119,6 @@ Rules:
 | `PlaceTextNormalizer` (Java) | Keep as a JVM UDF via `registerJavaFunction` during the port. The Java source stays in tf-places-matcher-model, which publishes the jar on its own to CodeArtifact Maven. | Training calls it the same way. Porting it to Python is a later, separately measured step. |
 | Spark sketch binaries | Small Python reader for Spark's CountMinSketch and BloomFilter formats | Do not re-export as exact lookup tables: the sketches are approximate and the current features include their errors. |
 
-## Performance rules
-
-- Moving a row of two strings from the JVM to Python costs 3.4-5.4 µs per core, about the same for pickled, Arrow-optimized and pandas UDFs. Numeric rows cost less: seven doubles cross through Arrow in about 0.85 µs. That decides where Python UDFs are acceptable.
-- Blocking features run on all spatial pairs (about 42B per run). Implement them as built-in Spark functions, never Python UDFs.
-  - name similarity: `1 - levenshtein(a, b) / greatest(length(a), length(b))`
-  - name TF-IDF: a `map<token, idf>` column built once per record in setup, then `array_intersect` plus map lookups
-- Pairwise features (about 170M pairs) go in one rapidfuzz-backed row-at-a-time `@udf` returning a struct with all features, so each pair crosses to Python once. Measured on the fused features, the plain pickled UDF is the fastest of the three types (42.5 µs/row, against 44.2 Arrow-optimized and 48.3 pandas). Model scoring is numeric and batched, so it runs `inplace_predict` in a pandas UDF.
-- Python UDFs inside `when()` run on every row (no short-circuit). Restructure conditional scoring so the expensive branch only sees the rows that need it.
-- Expected cost of this layout: about +3-4% run time. Python UDFs everywhere: about +15%. A literal pure-Python port: about 2.7x.
-- Glue: each worker runs up to 32 Python worker processes outside the JVM heap, each holding rapidfuzz, the booster and sketch readers. Test memory at full scale.
-
 ## Parity
 
 `compare.py` compares two run folders and reports, for people to review:
@@ -159,26 +132,9 @@ Method, set up before any porting:
 - Pin both sides to the same model. The Scala jar shades in its model version (`places.matcher.model.version` in its `pom.xml`), so a Python-vs-Scala run pins the model package to that version.
 - Mixed mode: run one Python stage on a Scala run's earlier stage outputs, so the differences come from that stage alone. A comparison of one stage's outputs gets built when matching is ported, shaped by what that work needs.
 
-There is no Scala-vs-Scala baseline. No places step depends on row order: ties break by score, then ID, and new group IDs are random but the comparison matches groups by their members. Divisions and addresses do have order-dependent steps (`first(...)`, greedy selection, `dropDuplicates`, the top-50 cut); if their comparison shows differences nobody can explain, check run-to-run variation then.
-
-Harness layout: a top-level `parity/` directory in this repo, outside `packages/`, so nothing in it ships to PyPI. It is deleted once Scala is archived.
-
-- `compare.py` is a standalone uv script with inline dependencies. It reads stage parquet with DuckDB, locally or straight from S3, with no Spark, and prints JSON.
-- `test_compare.py` tests it on small local parquet fixtures. Nothing touches AWS.
-- `README.md` gives the plain `aws` CLI commands that start Glue runs, each in its own run folder (a distinct `runId` for Scala, a distinct `outputPath` for Python), and that copy a Scala run's earlier stage outputs into a new run folder for mixed mode.
-- The regional test input lives at a private path passed as an argument, never committed.
+The harness lives in a top-level `parity/` directory, outside `packages/`, and is deleted once Scala is archived.
 
 Two constraints hold until cutover: job params use Scala's argument names, including `stages`; and stage outputs keep Scala's subdirectory names (`<postfix>/type=<table>/`) and columns, so either implementation can read the other's output.
-
-## Known parity traps
-
-1. `PlacesUnionedMatcher` never applies overrides: `getMatches` takes the overrides table and does not read it. The uniform overrides pre-step changes places results, so it stays off for places during the port. Decide whether this is a bug, and fix it as its own change.
-2. Pair orientation: the unioned matcher emits a pair only when `s.id < t.id`, then swaps baseline-candidate pairs into candidate-baseline order before clustering. Encode both as tested rules.
-3. Cluster winner selection (`SimpleBestMatchSelection`): prefer active baseline, then occurrence count, then composite score, then `base_id`. Occurrence counting ignores baseline-baseline pairs.
-4. Divisions greedy selection partitions rows by Java `String.hashCode` (`SparkUtils.getHash`), and selection state is shared within a partition. First try a deterministic window-based version and measure. If the differences from Scala are large, reproduce Java's hash as a native Spark expression (32-bit wraparound over code points) with the same partition count.
-5. String semantics: commons-text Levenshtein counts UTF-16 units; Spark's `levenshtein()` and Python's `Levenshtein`/`rapidfuzz` count code points. They differ only on emoji and other non-BMP characters. Accept and document it; training already uses code points.
-6. Java and Python `unidecode` tables differ. Keep `PlaceTextNormalizer` on the JVM to avoid this.
-7. Float details (division order, `log` in idf, float vs double) can flip pairs sitting exactly at a threshold. These differences are expected and get reviewed.
 
 ## Sequencing
 
@@ -205,20 +161,86 @@ OvertureMaps/overture-matchers is frozen except for fixes and archived after the
 - tf-data-platform, in the places match DAG:
   - the match task switches from the Scala main class and jar to `overture_matchers.job.MatchJob`, installed from PyPI at a pinned version
   - the single match task splits into four chained tasks, one per stage (`stages=setup`, then `matching`, `assignid`, `metrics`), so a failed stage retries alone. Each job adds about a minute of Glue startup, which is accepted
-  - params drop the leading dashes (`outputPath`, not `--outputPath`): a Python job receives its params as one JSON object, and `SparkSedonaJob.get_param` looks up bare names
   - the Scala matcher version setting becomes a matcher package version, plus a model package version
-  - the job's extra jars are GraphFrames (shaded into the Scala jar today), the `PlaceTextNormalizer` jar, and spark-nlp for divisions. jpostal and libphonenumber drop out: Sedona 1.8.0 ships jpostal, and phones use `phonenumbers`
-  - libpostal model data: the Scala job receives it as a Glue extra file, which works only because a JVM job's params pass through as Glue arguments, and a Python job's params do not. Instead, the v1.0.0 model data sits unpacked under an S3 prefix, the job's Spark conf sets `spark.sedona.libpostal.dataDir` to it, and setup calls `sc.addFile(<prefix>, recursive=True)`, Sedona's documented mode for remote data. The `.so` files drop out
   - the platform Sedona version moves to 1.8.0
-  - the DAG stops reading the job's `outputResultFile`. The final path is fixed by the layout (`<outputPath>/final/type=<table>/`), so the DAG builds the `{"<table>": "<path>"}` map itself. `MatchJob` writes no result file and ignores an `outputResultFile` param, so cloned Scala arguments still run
+  - job params, extra jars and libpostal data change too (see Details for agents)
   - the match run becomes one `Bundle`: `initialize` before the first stage, with both candidates and baseline as inputs; after metrics, the DAG adds `config.json` under `matcher` and calls `finalize()`. This replaces the current metadata step, which writes metadata directly after matching and records only candidates as inputs
   - the dev publishing and staging dispatch flow is rebuilt for wheels
 - tf-places-3ppp (third-party places pipeline): builds its own matcher image from a pinned overture-matchers commit and runs it with the places-signals config, which uses `PlacesMatcher`. The port does not cover `PlacesMatcher`, so 3ppp stays on its pinned Scala commit until the linkage mode exists.
-- Local Docker runtime (OvertureMaps/overture-matchers#390, open): the data scientists' local validation loop (OvertureMaps/tf-places-matcher-model#146) runs the Scala matcher through `just match`. It passes arguments the DAG does not: `embeddingsCachePath`, `embeddingCacheLiteralInMaxHashes`, `blockingSpatialPartitions`, `blockingShufflePartitions`, `platform`, `storageAccountName`. After places cuts over, the loop has to run the Python job to test what production runs.
+- Local Docker runtime (OvertureMaps/overture-matchers#390, open): the data scientists' local validation loop (OvertureMaps/tf-places-matcher-model#146) runs the Scala matcher through `just match`. After places cuts over, the loop has to run the Python job to test what production runs.
 
 ## Open items
 
-- Effort estimate: about 8-12 engineer-weeks, mostly tests (7.5k lines of ScalaTest) and parity work.
 - The library package's name.
 - Not yet measured: divisions and addresses prod volumes, the 3PPP/signals pipeline.
 - OvertureMaps/overture-embeddings (Python) owns the embedding model pin, int8 quantization, cosine scoring and text normalization. Check whether the places embedding feature can use it before porting `EmbeddingCacheCosineSimilarityCalculator`.
+
+## Details for agents
+
+Implementation details behind the design above.
+
+### Target structure
+
+- Steps do no I/O, so Spark evaluates them lazily and nothing executes until the stage writes.
+- Scala's `<outputPath>/<runId>` becomes the Python job's `outputPath`, so both write the same run folder layout.
+- The DAG is the only writer of `metadata.json`, because `Metadata` keys its sections by the Airflow `dag_id` and rewrites the whole file on every update. Downstream DAGs list the match bundle as an input, which carries its metadata forward.
+- `THEMES` is the only place the code branches on theme. Places conflation, baseline conflation and linkage (the three modes in OvertureMaps/overture-matchers#431) are three match functions over the same building blocks that differ in pair kinds and resolver.
+
+### Rules
+
+- Transformation functions are pure. S3 reads and writes happen only in stage functions and in `checkpoint(df, cfg, name)`, which writes to `<run>/<name>/` and returns a read of it. That cuts the lineage, so later transformations don't recompute earlier ones and the query plan stays small. Matching checkpoints after blocking, where about 42B spatial pairs shrink to about 170M. Checkpoint outputs stay with the run. With `outputDebug` on, matching also checkpoints `matches_validated/`, as Scala does.
+- A DataFrame that two branches of one stage read gets an explicit `.cache()`. In `match_places`, candidates feed both the history pairs and the spatial union.
+- Each stage output's columns are defined by the `select` that produces it, as in Scala (the transformer's required-columns list, the `MatchResult` columns). There is no separate schema validation layer for now; schema tracking across Overture pipelines is an open, org-wide question.
+- Setup functions build one `select` from a list of column expressions. A `withColumn` chain adds one projection per column to the query plan.
+- Boosters and sketch readers load once per executor process, through module-level `functools.cache` loaders keyed by resource name (the blocking booster, the scoring booster, each sketch). The model package is installed on every worker, so UDF closures capture only the resource name, never the loaded object.
+- The model bundle is a Python package in CodeArtifact, published by tf-places-matcher-model, with the boosters, sketches and manifest as package data. The DAG installs it on every worker at a version pinned by its own Airflow Variable, and `ModelBundle` finds its files with `importlib.resources`. It is not a dependency in this repo's `pyproject.toml`, so a model release does not force a matcher release.
+- Classes hold data and resources only: `RunConfig` (frozen dataclass) and `ModelBundle`. No abstract base classes, no strategy objects, no emulation of typed Datasets.
+- Overrides and history matches are pre-matches (Scala's `preMatch`): pairs accepted before blocking, without scoring. Each theme function calls the shared overrides and history functions it uses. During the port, places calls only the history one (see Known parity traps).
+- From the matching stage, assignid reads only `matches/`, never matching's checkpoints.
+- Features live in `features.py` and run only in Spark: built-in expressions for blocking features, one UDF for pairwise features (see Performance rules). Training installs the library package alone and imports the same module, so training and inference compute features with the same code. The model bundle records the library package's version, not the matcher's, so a library release signals a possible retrain. `ModelBundle.load()` compares that version with the installed library package and fails the stage on a mismatch, so features never change under a model silently.
+- Every transformation function has unit tests on a local SparkSession with a few rows. One shared places fixture covers each path through matching: history hit, history miss across a quadkey tile edge, renamed record, candidate-candidate duplicate, deleted baseline, no match, and two baseline records with the same signature.
+- Tests never load the production model bundle, which is private. A fixture trains a tiny booster with `xgboost` and builds sketches through Spark's JVM sketch classes, both on the fixture rows.
+- The `PlaceTextNormalizer` jar is private too. Fixtures carry the normalized columns precomputed. The few tests that run the normalizer itself carry a `normalizer` marker and skip when the jar is absent; they run locally and in tf-places-matcher-model's CI.
+
+### Performance rules
+
+- Moving a row of two strings from the JVM to Python costs 3.4-5.4 µs per core, about the same for pickled, Arrow-optimized and pandas UDFs. Numeric rows cost less: seven doubles cross through Arrow in about 0.85 µs. That decides where Python UDFs are acceptable.
+- Blocking features run on all spatial pairs (about 42B per run). Implement them as built-in Spark functions, never Python UDFs.
+  - name similarity: `1 - levenshtein(a, b) / greatest(length(a), length(b))`
+  - name TF-IDF: a `map<token, idf>` column built once per record in setup, then `array_intersect` plus map lookups
+- Pairwise features (about 170M pairs) go in one rapidfuzz-backed row-at-a-time `@udf` returning a struct with all features, so each pair crosses to Python once. Measured on the fused features, the plain pickled UDF is the fastest of the three types (42.5 µs/row, against 44.2 Arrow-optimized and 48.3 pandas). Model scoring is numeric and batched, so it runs `inplace_predict` in a pandas UDF.
+- Python UDFs inside `when()` run on every row (no short-circuit). Restructure conditional scoring so the expensive branch only sees the rows that need it.
+- Expected cost of this layout: about +3-4% run time. Python UDFs everywhere: about +15%. A literal pure-Python port: about 2.7x.
+- Glue: each worker runs up to 32 Python worker processes outside the JVM heap, each holding rapidfuzz, the booster and sketch readers. Test memory at full scale.
+
+### Parity
+
+There is no Scala-vs-Scala baseline. No places step depends on row order: ties break by score, then ID, and new group IDs are random but the comparison matches groups by their members. Divisions and addresses do have order-dependent steps (`first(...)`, greedy selection, `dropDuplicates`, the top-50 cut); if their comparison shows differences nobody can explain, check run-to-run variation then.
+
+Harness layout: `parity/` sits outside `packages/`, so nothing in it ships to PyPI.
+
+- `compare.py` is a standalone uv script with inline dependencies. It reads stage parquet with DuckDB, locally or straight from S3, with no Spark, and prints JSON.
+- `test_compare.py` tests it on small local parquet fixtures. Nothing touches AWS.
+- `README.md` gives the plain `aws` CLI commands that start Glue runs, each in its own run folder (a distinct `runId` for Scala, a distinct `outputPath` for Python), and that copy a Scala run's earlier stage outputs into a new run folder for mixed mode.
+- The regional test input lives at a private path passed as an argument, never committed.
+
+### Known parity traps
+
+1. `PlacesUnionedMatcher` never applies overrides: `getMatches` takes the overrides table and does not read it. The uniform overrides pre-step changes places results, so it stays off for places during the port. Decide whether this is a bug, and fix it as its own change.
+2. Pair orientation: the unioned matcher emits a pair only when `s.id < t.id`, then swaps baseline-candidate pairs into candidate-baseline order before clustering. Encode both as tested rules.
+3. Cluster winner selection (`SimpleBestMatchSelection`): prefer active baseline, then occurrence count, then composite score, then `base_id`. Occurrence counting ignores baseline-baseline pairs.
+4. Divisions greedy selection partitions rows by Java `String.hashCode` (`SparkUtils.getHash`), and selection state is shared within a partition. First try a deterministic window-based version and measure. If the differences from Scala are large, reproduce Java's hash as a native Spark expression (32-bit wraparound over code points) with the same partition count.
+5. String semantics: commons-text Levenshtein counts UTF-16 units; Spark's `levenshtein()` and Python's `Levenshtein`/`rapidfuzz` count code points. They differ only on emoji and other non-BMP characters. Accept and document it; training already uses code points.
+6. Java and Python `unidecode` tables differ. Keep `PlaceTextNormalizer` on the JVM to avoid this.
+7. Float details (division order, `log` in idf, float vs double) can flip pairs sitting exactly at a threshold. These differences are expected and get reviewed.
+
+### tf-data-platform DAG changes
+
+- params drop the leading dashes (`outputPath`, not `--outputPath`): a Python job receives its params as one JSON object, and `SparkSedonaJob.get_param` looks up bare names
+- the job's extra jars are GraphFrames (shaded into the Scala jar today), the `PlaceTextNormalizer` jar, and spark-nlp for divisions. jpostal and libphonenumber drop out: Sedona 1.8.0 ships jpostal, and phones use `phonenumbers`
+- libpostal model data: the Scala job receives it as a Glue extra file, which works only because a JVM job's params pass through as Glue arguments, and a Python job's params do not. Instead, the v1.0.0 model data sits unpacked under an S3 prefix, the job's Spark conf sets `spark.sedona.libpostal.dataDir` to it, and setup calls `sc.addFile(<prefix>, recursive=True)`, Sedona's documented mode for remote data. The `.so` files drop out
+- the DAG stops reading the job's `outputResultFile`. The final path is fixed by the layout (`<outputPath>/final/type=<table>/`), so the DAG builds the `{"<table>": "<path>"}` map itself. `MatchJob` writes no result file and ignores an `outputResultFile` param, so cloned Scala arguments still run
+
+### Local Docker runtime
+
+`just match` passes arguments the DAG does not: `embeddingsCachePath`, `embeddingCacheLiteralInMaxHashes`, `blockingSpatialPartitions`, `blockingShufflePartitions`, `platform`, `storageAccountName`.
