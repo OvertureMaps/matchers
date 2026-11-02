@@ -63,19 +63,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
-        with:
-          enable-cache: false # This workflow publishes a runtime artifact, so it must not trust a cache.
-
-      # The official Docker action resolves an unpinned GitPython. GitPython
-      # v3.1.60 removed Actor.name_email_regex, which PSR 10.6.1 reads at
-      # config load. This step installs PSR directly and pins GitPython below
-      # that release. Revert to the Docker action once a fixed PSR version ships.
-      # Issue: https://github.com/python-semantic-release/python-semantic-release/issues/1476
-      - name: Install python-semantic-release
-        run: uv tool install "python-semantic-release==10.6.1" --with "gitpython<3.1.60"
-
       # GITHUB_TOKEN can't push a tag whose commit has .github/workflows/
       # differing from every branch tip, so the tag goes out with an
       # overture-pull-requester App token, which has workflows write.
@@ -116,16 +103,20 @@ jobs:
 
       # PSR picks the version from commits that touch the package (path_filters
       # in its pyproject.toml), then tags, pushes, and creates the GitHub
-      # Release with the notes. It writes no commit or changelog. It pushes with
-      # GH_TOKEN because the checkout does not persist credentials.
+      # Release. No commit or changelog.
       - name: Release ${{ matrix.package }}
-        working-directory: packages/${{ matrix.package }}
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          semantic-release -v version --no-commit --tag --push --no-changelog --vcs-release --skip-build
+        uses: python-semantic-release/python-semantic-release@b700dbeb1f431a0fcc30a79f3f0869407fe07278 # v10.7.0
+        with:
+          directory: packages/${{ matrix.package }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          git_committer_name: github-actions[bot]
+          git_committer_email: 41898282+github-actions[bot]@users.noreply.github.com
+          commit: "false"
+          tag: "true"
+          push: "true"
+          changelog: "false"
+          vcs_release: "true"
+          build: "false"
 
   build:
     name: build ${{ matrix.package }}
