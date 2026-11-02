@@ -15,7 +15,7 @@
 # On workflow_dispatch, every package builds from its current state and
 # publishes to Test PyPI without tagging or a GitHub Release.
 #
-# If publishing fails after the tag is pushed, delete the tag and GitHub Release, then re-run.
+# If publishing fails after the tag is pushed, delete the tag and GitHub Release, then re-run all jobs.
 #
 # See PACKAGE_VERSIONING.md for the release flow and the trusted-publisher
 # setup a new package needs.
@@ -136,6 +136,7 @@ jobs:
           path: released
           if-no-files-found: error
           retention-days: 1
+          overwrite: true # a re-run attempt replaces the earlier marker
 
   build:
     name: build ${{ matrix.package }}
