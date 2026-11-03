@@ -169,7 +169,7 @@ At some point we should also figure out how this interacts with the model traini
 
 ### Additional Notes
 
-* **Non-Places Themes** - Themes don't share a fixed sequence of transformations: Addresses keeps only the 50 best pairs per candidate and scores each pair two ways, keeping the higher score. Divisions applies per-subtype thresholds and greedy selection, etc.
+* **Non-Places Themes** - Themes don't share a fixed sequence of transformations: Addresses keeps only the 50 best pairs per candidate and scores each pair two ways, keeping the higher score. Divisions applies per-subtype thresholds and greedy selection, etc. For this reason, I think a functional approach to matching makes more sense; there's not much motivation to standardize the way matchers work across themes. Anyway, that's pretty much what I sugget here.
 
 * **Config refactoring** - Scala's theme config JSON mostly wires classes by name, which plain functions make unnecessary. The remaining settings fall into two categories, roughly: run settings (`outputDebug`, `matchHistory`), which become fields in `RunConfig`, and theme constants (table name, ID generator) -- which are just constants in the theme module. With no config JSON left, there is nothing for `overrideConfigPath` to override, so the job has no such param.
 
