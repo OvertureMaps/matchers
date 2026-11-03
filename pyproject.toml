@@ -10,4 +10,4 @@ package = false
 required-version = ">=0.13.4"
 
 [dependency-groups]
-dev = ["ruff==0.17.1"]
+dev = ["ruff==0.17.3"]

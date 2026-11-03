@@ -23,8 +23,10 @@ PRs are squash-merged, so the PR title is the commit PSR reads. PSR attributes a
 On push to `main`, [`publish_packages.yml`](.github/workflows/publish_packages.yml) runs three jobs for each package the push touched:
 
 1. `release` runs PSR. If a bump is warranted, PSR tags `<package_dir>-v<version>` and publishes a GitHub Release with the notes; nothing is committed back to `main`. The tag is pushed with an overture-pull-requester App token, since `GITHUB_TOKEN` can't push tags that change workflows. The App key and the AWS credentials that fetch it are cleared before PSR runs, and no other job sees them.
-2. `build`, with no secrets, builds only if `HEAD` carries the package's release tag: `uv build`, then `twine check --strict`, then upload `dist/` as an artifact. Because it keys on the tag, re-running a failed run publishes a release that was tagged but never uploaded.
+2. `build`, with no secrets, builds only if this run's `release` job released the package: `uv build`, then `twine check --strict`, then upload `dist/` as an artifact.
 3. `publish`, with only `id-token: write`, uploads the artifact to PyPI by trusted publishing and skips versions already there.
+
+If publishing fails after the tag is pushed, that version stays unpublished, and the next release supersedes it. A re-run doesn't recover it: the release job finds no new commits, and a re-run attempt can't see the earlier attempt's release marker. Don't delete the tag or GitHub Release: this repo uses [immutable releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases), so the tag can't be deleted while its release exists and its name can't be reused.
 
 A manual run (`workflow_dispatch`) is a smoke test: no tag or release, every package builds from its current state and publishes to [Test PyPI](https://test.pypi.org/).
 
