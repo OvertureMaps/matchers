@@ -86,6 +86,7 @@ Stage names / marker names are just taken straight from the stage function's `__
 ```python
 # core/stages.py
 
+
 class RawInputs(NamedTuple):
     candidates: DataFrame
     baseline: DataFrame
@@ -114,6 +115,7 @@ These classes are the input/return types of the functions for each stage. Due to
 ```python
 """Places matching: setup -> matching -> assign_ids -> metrics."""
 
+
 def setup(raw: RawInputs) -> SetupOutput: ...  # normalize, ParseAddress, signatures
 def matching(
     prepared: SetupOutput,
@@ -123,20 +125,28 @@ def matching(
     output_debug: bool = False,
     checkpoint: Checkpoint = no_checkpoint,
 ) -> MatchingOutput: ...  # pairs, scoring, clusters
-def assign_ids(raw: RawInputs, prepared: SetupOutput, matched: MatchingOutput) -> AssignIdsOutput: ...  # cluster winners, GERS IDs
-def metrics(raw, prepared, matched, ids, previous) -> MetricsOutput: ...  # counts, churn
+def assign_ids(
+    raw: RawInputs, prepared: SetupOutput, matched: MatchingOutput
+) -> AssignIdsOutput: ...  # cluster winners, GERS IDs
+def metrics(
+    raw, prepared, matched, ids, previous
+) -> MetricsOutput: ...  # counts, churn
 ```
 
 Then, after each stage is defined (for a specific theme), that theme's `run()` wires them together. It starts by prepping all the pipeline inputs (input data, model, embeddings, previous metrics), and then chains together a bunch of `run_stage` calls:
 
 ```python
 def run(spark, config):
-    raw = RawInputs(read_tables(spark, config.input), read_tables(spark, config.baseline))
+    raw = RawInputs(
+        read_tables(spark, config.input), read_tables(spark, config.baseline)
+    )
     model = PlacesModel.load()
 
     prepared = run_stage(spark, config, setup, raw)
     matched = run_stage(
-        spark, config, matching,
+        spark,
+        config,
+        matching,
         prepared,
         model,
         embeddings=read_embeddings(spark, config),  # None when no table is set
@@ -145,7 +155,16 @@ def run(spark, config):
         checkpoint=io.checkpointer(config.output_path),
     )
     ids = run_stage(spark, config, assign_ids, raw, prepared, matched)
-    run_stage(spark, config, metrics, raw, prepared, matched, ids, read_previous_metrics(spark, config))
+    run_stage(
+        spark,
+        config,
+        metrics,
+        raw,
+        prepared,
+        matched,
+        ids,
+        read_previous_metrics(spark, config),
+    )
 
 
 class PlacesMatchingJob(SparkSedonaJob):
@@ -175,16 +194,25 @@ def no_checkpoint(df, name):
     return df
 
 
-def run_stage(spark, config, stage_fn: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
+def run_stage(
+    spark, config, stage_fn: Callable[P, T], *args: P.args, **kwargs: P.kwargs
+) -> T:
     stage = stage_fn.__name__
     output_type = get_type_hints(stage_fn)["return"]
     if not io.stage_is_done(config.output_path, stage):
         outputs = stage_fn(*args, **kwargs)
         for name, df in outputs._asdict().items():
             io.write_output(config.output_path, name, df)
-        io.mark_stage_done(config.output_path, stage)  # writes _completed_stages/<stage>
+        io.mark_stage_done(
+            config.output_path, stage
+        )  # writes _completed_stages/<stage>
         spark.catalog.clearCache()  # everything is on S3 between stages
-    return output_type(*(io.read_output(spark, config.output_path, name) for name in output_type._fields))
+    return output_type(
+        *(
+            io.read_output(spark, config.output_path, name)
+            for name in output_type._fields
+        )
+    )
 
 
 def run_local(run, params_file):
