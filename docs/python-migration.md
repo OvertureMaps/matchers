@@ -59,7 +59,7 @@ with TaskGroup("places_matching"):
     init = initialize_bundle(bundle, inputs)
 
     job = spark_job(
-        module_name="overture_matchers.places",
+        module_name="overture_matchers.places.job",
         class_name="PlacesMatchingJob",
         packages="overture-matchers[places]==<version> <model package>==<version>",
         jars=[...],  # GraphFrames, PlaceTextNormalizer
@@ -87,7 +87,7 @@ Inside the job, we have a theme-specific orchestration layer that scans for `_SU
 
 def setup(spark, config): ...  # load, normalize, ParseAddress, write
 def matching(spark, config): ...  # candidates, scoring, write pairs
-def assign_ids(spark, config): ...  # history, GERS IDs, write
+def assign_ids(spark, config): ...  # cluster winners, GERS IDs, write
 def metrics(spark, config): ...  # counts, churn, write
 
 
@@ -178,7 +178,7 @@ At some point we should also figure out how this interacts with the model traini
 
 * **Non-Places Themes** - Themes don't share a fixed sequence of transformations: Addresses keeps only the 50 best pairs per candidate and scores each pair two ways, keeping the higher score. Divisions applies per-subtype thresholds and greedy selection, etc. For this reason, I think a functional approach to matching makes more sense; there's not much motivation to standardize the way matchers work across themes. Anyway, that's pretty much what I suggest here.
 
-* **Config refactoring** - Scala's theme config JSON mostly wires classes by name, which plain functions make unnecessary. The remaining settings fall into two categories, roughly: run settings (`outputDebug`, `matchHistory`), which become fields in `RunConfig`, and theme constants (table name, ID generator) -- which are just constants in the theme module. With no config JSON left, there is nothing for `overrideConfigPath` to override, so the job has no such param. The `{table: [paths]}` maps for `input` and `baseline` also become per-theme params during the cutover (for places, just candidate and baseline paths).
+* **Config refactoring** - Scala's theme config JSON mostly wires classes by name, which plain functions make unnecessary. The remaining settings fall into two categories, roughly: run settings (`outputDebug`, `matchHistory`), which become fields in `RunConfig`, and theme constants (table name, ID generator) -- which are just constants in the theme package. With no config JSON left, there is nothing for `overrideConfigPath` to override, so the job has no such param. The `{table: [paths]}` maps for `input` and `baseline` also become per-theme params during the cutover (for places, just candidate and baseline paths).
 
 * **Mixed Mode** - During the port, we may want to run the Scala pipeline up to a specific point, then let Python take over, or vice versa. To do this, I think we can just copy the Scala run's outputs into the matching stage folders of a new run folder, write some `_SUCCESS` files, and let the Python job skip any already-completed stages (see Parity). This should never need to happen in a prod environment, so I think I can hack around it during development.
 
@@ -188,18 +188,28 @@ At some point we should also figure out how this interacts with the model traini
 packages/
   overture_matchers/
     overture_matchers/
-      core/
-        config.py  # frozen dataclass RunConfig, built from the job params
-        io.py      # read_stage/write_stage, checkpoint, stage markers, config.json write and check
-        stages.py  # run_stages, run_local
-      places.py    # places stage functions, STAGES, PlacesMatchingJob
-      model.py     # PlacesModel, XGBoost predict
-      features.py  # place-pair features
+      core/              # run plumbing only, no matching logic
+        config.py        # frozen dataclass RunConfig, built from the job params
+        io.py            # read_stage/write_stage, checkpoint, stage markers, config.json write and check
+        stages.py        # run_stages, run_local
+      clustering.py      # connected components, greedy, simple
+      ids.py             # GERS ID minting
+      prematch.py        # overrides and history pre-matches
+      places/
+        job.py           # stage functions, STAGES, PlacesMatchingJob
+        blocking.py      # pair generation: spatial join, blocking filter
+        features.py      # place-pair features
+        model.py         # PlacesModel, XGBoost predict
+        selection.py     # cluster winner selection
+      divisions/
+        job.py
+        ...
+    tests/
 ```
 
-Other modules are added as code arrives, named for what they do. A module becomes a subpackage only when it outgrows one file.
+Other modules are added as code arrives, named for what they do.
 
-The repo follows overture-core's `packages/` layout, starting with one package. Transformation functions shared across themes, including `features.py` and the shared normalization, live in their own modules and never import a theme module. Theme-specific steps stay in their theme module. Shared code moves into a second package only when something outside `overture_matchers` needs it, such as tf-places-matcher-model importing `features.py` (see Open items).
+The repo follows overture-core's `packages/` layout, starting with one package. Each theme is a subpackage holding its job and its theme-only steps. Modules shared across themes, such as clustering, ID minting and the shared normalization, sit at the top level and never import a theme package. Blocking stays in `places/` for now: the current blocking is theme-specific, and the port doesn't change it. Shared code moves into a second package only when something outside `overture_matchers` needs it (see Open items).
 
 Theme-specific dependencies go in per-theme extras (e.g. `overture-matchers[places]` pulls in `xgboost` and `rapidfuzz`), so each DAG only installs what its job runs. `io.py` builds on overture-core's `hadoop_fs` helpers; anything missing there (`exists`, a write helper) gets added upstream.
 
@@ -259,7 +269,7 @@ Each theme cuts over to Python as a whole, once all its stages pass parity. Over
 
 - tf-places-matcher-model: releases the model as a Python package to CodeArtifact (manifest JSON, booster files, sketch binaries, test datasets as package data) and the `PlaceTextNormalizer` jar to CodeArtifact Maven, instead of one Maven jar holding both. Dual-publishes the old jar until places cuts over. Training keeps its own feature code for now (see Open items).
 - tf-data-platform, in the places match DAG:
-  - the match task switches from the Scala main class and jar to the jobs in `overture_matchers.places`, installed from PyPI at a pinned version
+  - the match task switches from the Scala main class and jar to the job in `overture_matchers.places.job`, installed from PyPI at a pinned version
   - the match task stays one task running one job, `PlacesMatchingJob`, on one cluster, as Scala does today. An Airflow retry resumes at the first stage without a `_SUCCESS` marker. Each theme gets its own task group
   - the Scala matcher version setting becomes a matcher package version, plus a model package version
   - the platform Sedona version moves to 1.8.1
@@ -268,12 +278,12 @@ Each theme cuts over to Python as a whole, once all its stages pass parity. Over
   - readers of Scala's flat run folder move to the stage folders: telemetry, match evaluation, the previous-metrics lookup, and the helper that derives the run folder from the final output path
   - the dev publishing and staging dispatch flow is rebuilt for wheels
 - tf-places-3ppp (third-party places pipeline): builds its own matcher image from a pinned overture-matchers commit and runs it with the places-signals config, which uses `PlacesMatcher`. The port does not cover `PlacesMatcher`, so 3ppp stays on its pinned Scala commit until the linkage mode exists.
-- Local Docker runtime (OvertureMaps/overture-matchers#390, open): the data scientists' local validation loop (OvertureMaps/tf-places-matcher-model#146) runs the Scala matcher through `just match`. After places cuts over, the loop runs `places.py`'s local runner, which walks the same `STAGES` as production.
+- Local Docker runtime (OvertureMaps/overture-matchers#390, open): the data scientists' local validation loop (OvertureMaps/tf-places-matcher-model#146) runs the Scala matcher through `just match`. After places cuts over, the loop runs the local runner in `overture_matchers.places.job`, which walks the same `STAGES` as production.
 
 ## Open items
 
 - When shared code moves into its own package, and that package's name.
-- Training and features, after the MVP: whether tf-places-matcher-model imports `features.py` from this repo, and how a model and the feature code it was trained on are kept in step. Today `FeatureParityTest.scala` recomputes the model jar's `test_dataset.parquet` features in the matcher's CI.
+- Training and features, after the migration: where the single copy of the feature code lives, and how a model and the feature code it was trained on are kept in step. One option is for tf-places-matcher-model to import `places/features.py` from this repo. The other is for this repo to import the training repo's feature code as an optional dependency, which needs CodeArtifact access in CI and faster feature code in the training repo. Today `FeatureParityTest.scala` recomputes the model jar's `test_dataset.parquet` features in the matcher's CI.
 - Not yet measured: divisions and addresses prod volumes, the 3PPP/signals pipeline.
 - Parity acceptance: what each stage's comparison checks and what difference is acceptable before a theme cuts over.
 - A mapping of every Scala, DAG and `just match` param to its `RunConfig` field, theme constant, Spark setting, or removal.
@@ -322,11 +332,11 @@ Implementation details behind the design above.
 - Setup functions build one `select` from a list of column expressions. A `withColumn` chain adds one projection per column to the query plan.
 - Boosters and sketch readers load once per executor process, through module-level `functools.cache` loaders keyed by resource name (the blocking booster, the scoring booster, each sketch). The model package is installed on every worker, so UDF closures capture only the resource name, never the loaded object.
 - The model package is a Python package in CodeArtifact, published by tf-places-matcher-model, with the boosters, sketches and manifest as package data. The DAG installs it on every worker at a version pinned by its own Airflow Variable, and `PlacesModel` finds its files with `importlib.resources`. It is not a dependency in this repo's `pyproject.toml`, so a model release does not force a matcher release.
-- The embeddings cache is an Iceberg table, so read it with `spark.table()`.
+- The embeddings cache is an Iceberg table, so read it with `spark.table()`. The table name is a `RunConfig` field, so a local run can point it at a temp view of local parquet.
 - Classes hold data and resources only: `RunConfig` (frozen dataclass) and `PlacesModel`. No abstract base classes, no strategy objects, no emulation of typed Datasets.
 - Overrides and history matches are pre-matches (Scala's `preMatch`): pairs accepted before blocking, without scoring. Each theme function calls the shared overrides and history functions it uses. During the port, places calls only the history one (see Known parity traps).
 - From the matching stage, `assign_ids` reads only `matching/matches/`, never matching's checkpoints.
-- Features live in `features.py` and run only in Spark: built-in expressions for blocking features, one UDF for pairwise features (see Performance rules). `PlacesModel.load()` reads the manifest for the thresholds, the spatial radius and the feature order. The manifest also carries the feature names and a feature version, and `load()` asserts both against `features.py`.
+- Features live in `places/features.py` and run only in Spark: built-in expressions for blocking features, one UDF for pairwise features (see Performance rules). `PlacesModel.load()` reads the manifest for the thresholds, the spatial radius and the feature order. The manifest also carries the feature names and a feature version, and `load()` asserts both against `features.py`.
 - A test pins each theme's stage names, e.g. `assert [s.__name__ for s in STAGES] == ["setup", "matching", "assign_ids", "metrics"]`, since they're also the folder names readers depend on.
 - Every transformation function has unit tests on a local SparkSession with a few rows. One shared places fixture covers each path through matching: history hit, history miss across a quadkey tile edge, renamed record, candidate-candidate duplicate, deleted baseline, no match, and two baseline records with the same signature.
 - Tests never load the production model package, which is private. A fixture trains a tiny booster with `xgboost` and builds sketches through Spark's JVM sketch classes, both on the fixture rows.
@@ -361,7 +371,7 @@ Harness layout: `parity/` sits outside `packages/`, so nothing in it ships to Py
 ### Known parity traps
 
 1. `PlacesUnionedMatcher` never applies overrides: `getMatches` takes the overrides table and does not read it. The uniform overrides pre-step changes places results, so it stays off for places during the port. Decide whether this is a bug, and fix it as its own change.
-2. Pair orientation: the unioned matcher emits a pair only when `s.id < t.id`, then swaps baseline-candidate pairs into candidate-baseline order before clustering. Encode both as tested rules.
+2. Pair orientation: the unioned matcher emits a pair only when `s.id < t.id`, so a pair's sides are in ID order, not role order. After clustering, Scala swaps baseline-candidate pairs so the candidate is in `id`. Python skips the swap and names each pair's sides by role (candidate, baseline). The `matches` output keeps Scala's orientation, and a test pins it. Scala scores pairs in ID order, so if the sides are named by role before scoring, first check that every pairwise feature is symmetric.
 3. Cluster winner selection (`SimpleBestMatchSelection`): prefer active baseline, then occurrence count, then composite score, then `base_id`. The occurrence count for a `base_id` includes every pair with that `base_id`, baseline-baseline pairs too. Only candidate-baseline pairs can be the selected pair.
 4. Divisions greedy selection partitions rows by Java `String.hashCode` (`SparkUtils.getHash`), and selection state is shared within a partition. First try a deterministic window-based version and measure. If the differences from Scala are large, reproduce Java's hash as a native Spark expression (signed 32-bit wraparound over UTF-16 code units) with the same partition count.
 5. String semantics: commons-text Levenshtein counts UTF-16 units; Spark's `levenshtein()` and Python's `Levenshtein`/`rapidfuzz` count code points. They differ only on emoji and other non-BMP characters. Accept and document it; training already uses code points.
