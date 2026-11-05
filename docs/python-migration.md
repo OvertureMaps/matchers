@@ -33,9 +33,10 @@ At a high level, I'd like to remove the class structure entirely:
 * Matching is still a single `SparkSedonaJob`.
 * That job is a chain of *stages*
   * e.g. setup -> matching -> assign_ids -> metrics
-  * Each stage writes to its own subdirectory within the run's `MatchBundle` (a new kind of `Bundle`, we were already kinda doing this, but now it's official). I did consider using separate bundles, but matching is typically run all-at-once, and the metadata.json gets needlessly messy if everything is in its own bundle. I think that, in general, 1 DAG run ~ 1 Bundle (lmk if you disagree)
+  * Each stage writes to its own subdirectory within the run's `MatchBundle` (a new kind of `Bundle`, we were kinda already doing this, but now it's official) using Scala's flat folder layout. I did consider using separate bundles, but matching is typically run all-at-once, and the metadata.json gets needlessly messy if everything is in its own bundle. I think that, in general, 1 DAG run ~ 1 Bundle (lmk if you disagree)
   * The job writes directly to the bundle's output path. Scala appends `runId` to the output path; the Python job doesn't. Scala also uses `runId` to name the metrics snapshot (`<provider>-<theme>-<runId>`), so the job still takes it for that.
-  * Each stage writes a `_SUCCESS` file to its own subdirectory in the bundle; if a stage fails, rerunning the matching job will pick up at the last `_SUCCESS` marker.
+  * To track stage success, the bundle has a `_completed_stages` subdirectory that contains success files at `_completed_stages/<stage>` that are written when `<stage>` has finished running. This is how reruns can pick up again partway through the job.
+* Stages are pure functions, too, mapping a `NamedTuple` of dataframes to another `NamedTuple` of dataframes. The orchestration layer sits above this and cand decide whether the functions are just chained together (for local tests) or written to / read from S3 between stages (for runs at scale).
 * Stages are composed of *steps*:
   * Each step is a `DataFrame`->`DataFrame` transformation.
   * Steps chain together with `df.transform` when possible, e.g. `df.transform(spatial_pairs, radius_m=400)`
@@ -78,53 +79,126 @@ with TaskGroup("places_matching"):
     chain(inputs, init, job, add_config, finalize_bundle(bundle))
 ```
 
-Inside the job, we have a theme-specific orchestration layer that scans for `_SUCCESS` files and calls different stages:
+Inside the job, each stage is just a function : `DataFrames -> NamedTuple of DataFrames`. Bedause stages don't do any I/O themselves, you can run them ad-hoc in a notebook or a unit test.
+
+Stage names / marker names are just taken straight from the stage function's `__name__`, and the attributes are different DataFrames corresponding to output folders in the run directory. I think it's probably fine to put these classes up in `core/stages.py`, since I anticipate that most themes will reuse them. If a theme needs something else, eventually, we can just add a theme-specific tuple.
+
+```python
+# core/stages.py
+
+class RawInputs(NamedTuple):
+    candidates: DataFrame
+    baseline: DataFrame
+
+
+class SetupOutput(NamedTuple):
+    candidates: DataFrame
+    baseline: DataFrame
+
+
+class MatchingOutput(NamedTuple):
+    matches: DataFrame
+
+
+class AssignIdsOutput(NamedTuple):
+    final: DataFrame
+    fallout: DataFrame
+
+
+class MetricsOutput(NamedTuple):
+    metrics: DataFrame
+```
+
+These classes are the input/return types of the functions for each stage. Due to the complexities of our current pipelines, those functions may accept additional arguments, too:
+
 ```python
 """Places matching: setup -> matching -> assign_ids -> metrics."""
 
-# All the stages...
+def setup(raw: RawInputs) -> SetupOutput: ...  # normalize, ParseAddress, signatures
+def matching(
+    prepared: SetupOutput,
+    model: PlacesModel,
+    embeddings: DataFrame | None = None,
+    match_history: bool = False,
+    output_debug: bool = False,
+    checkpoint: Checkpoint = no_checkpoint,
+) -> MatchingOutput: ...  # pairs, scoring, clusters
+def assign_ids(raw: RawInputs, prepared: SetupOutput, matched: MatchingOutput) -> AssignIdsOutput: ...  # cluster winners, GERS IDs
+def metrics(raw, prepared, matched, ids, previous) -> MetricsOutput: ...  # counts, churn
+```
 
+Then, after each stage is defined (for a specific theme), that theme's `run()` wires them together. It starts by prepping all the pipeline inputs (input data, model, embeddings, previous metrics), and then chains together a bunch of `run_stage` calls:
 
-def setup(spark, config): ...  # load, normalize, ParseAddress, write
-def matching(spark, config): ...  # candidates, scoring, write pairs
-def assign_ids(spark, config): ...  # cluster winners, GERS IDs, write
-def metrics(spark, config): ...  # counts, churn, write
+```python
+def run(spark, config):
+    raw = RawInputs(read_tables(spark, config.input), read_tables(spark, config.baseline))
+    model = PlacesModel.load()
 
-
-STAGES = [setup, matching, assign_ids, metrics]
+    prepared = run_stage(spark, config, setup, raw)
+    matched = run_stage(
+        spark, config, matching,
+        prepared,
+        model,
+        embeddings=read_embeddings(spark, config),  # None when no table is set
+        match_history=config.match_history,
+        output_debug=config.output_debug,
+        checkpoint=io.checkpointer(config.output_path),
+    )
+    ids = run_stage(spark, config, assign_ids, raw, prepared, matched)
+    run_stage(spark, config, metrics, raw, prepared, matched, ids, read_previous_metrics(spark, config))
 
 
 class PlacesMatchingJob(SparkSedonaJob):
     def execute_job(self):
-        run_stages(STAGES, self.spark, RunConfig.for_run(self.params))
+        run(self.spark, RunConfig.for_run(self.params))
 
 
 if __name__ == "__main__":
-    run_local(STAGES, sys.argv[1])
+    run_local(run, sys.argv[1])
 ```
 
-The stage loop is the same for every theme, so it lives in `core/`:
+`run_stage` is shared by all themes in `core/`; it does a few things:
+* It skips any stage that has a marker present
+* It calls the stage function with all the necessary arguments
+* It writes the stage output to S3 along with a success marker in `completed_stages/<stage>`
+* It "reads" back the written outputs and returns the `DataFrame`s. Parquet reads are lazily eval'd by Spark, so this shouldn't incur any costs on the final stage.
+
+It also uses `ParamSpec` / `TypeVar` from Python 3.10+ for better type hinting.
 
 ```python
-def run_stages(stages, spark, config):
-    for stage in stages:
-        if io.stage_is_done(config.output_path, stage.__name__):
-            continue
-        stage(spark, config)
-        io.mark_stage_done(config.output_path, stage.__name__)  # writes a _SUCCESS file
+Checkpoint = Callable[[DataFrame, str], DataFrame]
+P = ParamSpec("P")
+T = TypeVar("T")
+
+
+def no_checkpoint(df, name):
+    return df
+
+
+def run_stage(spark, config, stage_fn: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
+    stage = stage_fn.__name__
+    output_type = get_type_hints(stage_fn)["return"]
+    if not io.stage_is_done(config.output_path, stage):
+        outputs = stage_fn(*args, **kwargs)
+        for name, df in outputs._asdict().items():
+            io.write_output(config.output_path, name, df)
+        io.mark_stage_done(config.output_path, stage)  # writes _completed_stages/<stage>
         spark.catalog.clearCache()  # everything is on S3 between stages
+    return output_type(*(io.read_output(spark, config.output_path, name) for name in output_type._fields))
 
 
-def run_local(stages, params_file):
+def run_local(run, params_file):
     params = json.loads(Path(params_file).read_text())
-    run_stages(stages, local_sedona_session(), RunConfig.for_run(params))
+    run(local_sedona_session(), RunConfig.for_run(params))
 ```
+
+To explore, you can call a stage function directly, e.g. `matching(SetupOutput(my_candidates, my_baseline), model)`. With the default `no_checkpoint` this doesn't write anything, which is fine for small datasets.
 
 Where the little `io` helper has functions like:
 
 ```python
 def stage_is_done(output_path, stage_name):
-    return exists(f"{output_path}/{stage_name}/_SUCCESS")
+    return exists(f"{output_path}/_completed_stages/{stage_name}")
 ```
 
 And `RunConfig` is pretty flat; it looks something like:
@@ -154,20 +228,15 @@ class RunConfig:
 Meanwhile, the actual transformations look like:
 
 ```python
-def setup(spark, config):
-    """Load and normalize candidates and baseline."""
-    raw_candidates = read_tables(spark, config.input)
-    raw_baseline = read_tables(spark, config.baseline)
-
+def setup(raw: RawInputs) -> SetupOutput:
+    """Normalize candidates and baseline."""
     candidates = (
-        raw_candidates.transform(normalize_places)
+        raw.candidates.transform(normalize_places)
         .transform(parse_addresses)  # libpostal ParseAddress
         .transform(add_signature)
     )
-    baseline = raw_baseline.transform(normalize_places).transform(add_signature)
-
-    write_stage(config, "setup", "candidates", candidates)
-    write_stage(config, "setup", "baseline", baseline)
+    baseline = raw.baseline.transform(normalize_places).transform(add_signature)
+    return SetupOutput(candidates, baseline)
 ```
 
 Functions like `normalize_places` and `parse_addresses` make heavy use of shared modules in `overture_matchers`, which hold theme-specific features as well as cross-theme normalization logic, etc.
@@ -180,7 +249,7 @@ At some point we should also figure out how this interacts with the model traini
 
 * **Config refactoring** - Scala's theme config JSON mostly wires classes by name, which plain functions make unnecessary. The remaining settings fall into two categories, roughly: run settings (`outputDebug`, `matchHistory`), which become fields in `RunConfig`, and theme constants (table name, ID generator) -- which are just constants in the theme package. With no config JSON left, there is nothing for `overrideConfigPath` to override, so the job has no such param. The `{table: [paths]}` maps for `input` and `baseline` also become per-theme params during the cutover (for places, just candidate and baseline paths).
 
-* **Mixed Mode** - During the port, we may want to run the Scala pipeline up to a specific point, then let Python take over, or vice versa. To do this, I think we can just copy the Scala run's outputs into the matching stage folders of a new run folder, write some `_SUCCESS` files, and let the Python job skip any already-completed stages (see Parity). This should never need to happen in a prod environment, so I think I can hack around it during development.
+* **Mixed Mode** - During the port, we may want to run the Scala pipeline up to a specific point, then let Python take over, or vice versa. To do this, I think we can just copy the Scala run's outputs into a new run folder, write some stage markers, and let the Python job skip any already-completed stages (see Parity). This should never need to happen in a prod environment, so I think I can hack around it during development.
 
 ### Package layout
 
@@ -190,13 +259,13 @@ packages/
     overture_matchers/
       core/              # run plumbing only, no matching logic
         config.py        # frozen dataclass RunConfig, built from the job params
-        io.py            # read_stage/write_stage, checkpoint, stage markers, config.json write and check
-        stages.py        # run_stages, run_local
+        io.py            # read_output/write_output, checkpoint, stage markers, config.json write and check
+        stages.py        # stage output types, run_stage, run_local, Checkpoint
       clustering.py      # connected components, greedy, simple
       ids.py             # GERS ID minting
       prematch.py        # overrides and history pre-matches
       places/
-        job.py           # stage functions, STAGES, PlacesMatchingJob
+        job.py           # stage functions, run(), PlacesMatchingJob
         blocking.py      # pair generation: spatial join, blocking filter
         features.py      # place-pair features
         model.py         # PlacesModel, XGBoost predict
@@ -240,11 +309,11 @@ Method, set up before any porting:
 
 - A fixed regional test input, large enough to cover several countries and scripts.
 - Pin both sides to the same model. The Scala jar shades in its model version (`places.matcher.model.version` in its `pom.xml`), so a Python-vs-Scala run pins the model package to that version.
-- Mixed mode: copy a Scala run's earlier stage outputs into the matching stage folders of a new run folder (Scala's `candidates/` goes to `setup/candidates/`), write `_SUCCESS` markers for those stages, and run the Python job. It skips the marked stages, so differences in the next stage's output come from that stage alone. A comparison of one stage's outputs gets built when matching is ported, shaped by what that work needs. Mixed mode is a development tool only; production never mixes Scala and Python stages.
+- Mixed mode: copy a Scala run's earlier stage outputs into a new run folder at the same paths, write markers for those stages, and run the Python job. It skips the marked stages, so differences in the next stage's output come from that stage alone. A comparison of one stage's outputs gets built when matching is ported, shaped by what that work needs. Mixed mode is a development tool only; production never mixes Scala and Python stages.
 
 The harness lives in a top-level `parity/` directory, outside `packages/`, and is deleted once Scala is archived.
 
-Until cutover, places keeps Scala's four stages and job params keep Scala's argument names. Each stage writes under its own folder, `<stage>/<postfix>/type=<table>/`. The `<postfix>` names and columns stay Scala's, so moving data between the two layouts only means mapping a Scala folder to its stage folder. After cutover, the layout is a contract with its readers. Changing it means a parallel change: write both layouts, move the readers, then drop the old one.
+Until cutover, places keeps Scala's four stages and job params keep Scala's argument names. Outputs keep Scala's layout, `<postfix>/type=<table>/`, with Scala's `<postfix>` names and columns, so a Scala run folder and a Python run folder look the same. Python adds only `config.json` and the `_completed_stages/` markers. The layout is a contract with its readers. Changing it means a parallel change: write both layouts, move the readers, then drop the old one.
 
 ## Sequencing
 
@@ -270,15 +339,15 @@ Each theme cuts over to Python as a whole, once all its stages pass parity. Over
 - tf-places-matcher-model: releases the model as a Python package to CodeArtifact (manifest JSON, booster files, sketch binaries, test datasets as package data) and the `PlaceTextNormalizer` jar to CodeArtifact Maven, instead of one Maven jar holding both. Dual-publishes the old jar until places cuts over. Training keeps its own feature code for now (see Open items).
 - tf-data-platform, in the places match DAG:
   - the match task switches from the Scala main class and jar to the job in `overture_matchers.places.job`, installed from PyPI at a pinned version
-  - the match task stays one task running one job, `PlacesMatchingJob`, on one cluster, as Scala does today. An Airflow retry resumes at the first stage without a `_SUCCESS` marker. Each theme gets its own task group
+  - the match task stays one task running one job, `PlacesMatchingJob`, on one cluster, as Scala does today. An Airflow retry resumes at the first stage without a marker. Each theme gets its own task group
   - the Scala matcher version setting becomes a matcher package version, plus a model package version
   - the platform Sedona version moves to 1.8.1
   - job params, extra jars and libpostal data change too (see Details for agents)
   - the match run becomes one `MatchBundle`, a new `Bundle` subclass, set up by the bundle initialize task group before the job and sealed by the finalize task group after it. Candidate and baseline paths are resolved at run time, so the initialize task group needs a way to record input paths from XCom; today it takes only `Bundle` objects known when the DAG is parsed. Between the job and finalization, a new task reads `config.json` and adds it to `metadata.json` under `matcher`. This replaces the current metadata step, which writes metadata directly after matching and records only candidates as inputs
-  - readers of Scala's flat run folder move to the stage folders: telemetry, match evaluation, the previous-metrics lookup, and the helper that derives the run folder from the final output path
+  - readers of Scala's run folder (telemetry, match evaluation, the previous-metrics lookup, the helper that derives the run folder from the final output path) keep their paths inside the run folder. Only the run folder itself changes: the bundle base URI instead of `<outputPath>/<runId>`
   - the dev publishing and staging dispatch flow is rebuilt for wheels
 - tf-places-3ppp (third-party places pipeline): builds its own matcher image from a pinned overture-matchers commit and runs it with the places-signals config, which uses `PlacesMatcher`. The port does not cover `PlacesMatcher`, so 3ppp stays on its pinned Scala commit until the linkage mode exists.
-- Local Docker runtime (OvertureMaps/overture-matchers#390, open): the data scientists' local validation loop (OvertureMaps/tf-places-matcher-model#146) runs the Scala matcher through `just match`. After places cuts over, the loop runs the local runner in `overture_matchers.places.job`, which walks the same `STAGES` as production.
+- Local Docker runtime (OvertureMaps/overture-matchers#390, open): the data scientists' local validation loop (OvertureMaps/tf-places-matcher-model#146) runs the Scala matcher through `just match`. After places cuts over, the loop runs the local runner in `overture_matchers.places.job`, which calls the same `run()` as production.
 
 ## Open items
 
@@ -295,17 +364,17 @@ Implementation details behind the design above.
 
 ### Target structure
 
-- Steps do no I/O, so Spark evaluates them lazily and nothing executes until the stage writes.
-- The Python job's `outputPath` is the `MatchBundle` base URI, the counterpart of Scala's `<outputPath>/<runId>`. Inside it, each stage owns one folder named after the stage (`setup/`, `matching/`, `assign_ids/`, `metrics/`) holding its outputs and its `_SUCCESS` marker.
+- Steps and stages do no I/O, so Spark evaluates them lazily and nothing executes until `run_stage` writes the outputs.
+- The Python job's `outputPath` is the `MatchBundle` base URI, the counterpart of Scala's `<outputPath>/<runId>`. Inside it, outputs sit at Scala's paths (`candidates/`, `matches/`, `final/`, ...), next to `config.json` and the stage markers in `_completed_stages/` (`_completed_stages/setup`, `_completed_stages/matching`, ...).
 - The DAG is the only writer of `metadata.json`, because `Metadata` keys its sections by the Airflow `dag_id` and rewrites the whole file on every update. Downstream DAGs list the match bundle as an input, which carries its metadata forward.
-- The code never checks which theme it's running. The DAG picks the theme by choosing which job to launch, and that theme's `STAGES` list fixes the stage order.
+- The code never checks which theme it's running. The DAG picks the theme by choosing which job to launch, and that theme's `run()` fixes the stage order.
 - Places has three matching modes (see OvertureMaps/overture-matchers#431): places conflation, baseline conflation and linkage. Each mode gets its own match function. They share the same building blocks and differ only in which kinds of pairs they compare and how they pick the final match.
 - Follow Overture conventions in the code: MIT header and a one-paragraph purpose on every file, real docstrings on public functions, DCO sign-off (`git commit -s`), `python:X.Y-slim` images with uv from a pinned `ghcr.io/astral-sh/uv` stage.
 - `RunConfig` exists only in the Python process that drives the job (the Spark driver). Executors get plain values from it, never the object.
 - `RunConfig` holds the job params, with defaults filled in and values parsed into real types. Theme constants and the model stay out of it.
 - The job starts with `RunConfig.for_run(params)`, which builds `RunConfig` from the params and writes `config.json` before reading any input. If the run folder already has a `config.json` that differs, the job fails. Otherwise a rerun with changed params would skip stages that ran with the old ones. Apart from that check, nothing reads `config.json` back: a retry gets the same params from Airflow and builds the same config. Anything resolved at run time (a "latest" baseline, a timestamp) is resolved in the DAG and passed in as a param, so the job never resolves anything on its own.
 - Every stage write uses `mode("overwrite")`, so rerunning a stage without a marker replaces whatever a failed attempt left behind.
-- `run_stages` writes a stage's `_SUCCESS` marker after the stage function returns, and clears Spark's cache before the next stage. Spark's own `_SUCCESS` files mark single DataFrame writes, so they never stand in for a stage marker.
+- `run_stage` writes a stage's marker after all of the stage's outputs are written, and clears Spark's cache before the next stage. Spark's own `_SUCCESS` files mark single DataFrame writes, so they never stand in for a stage marker.
 - `config.json` lists every field, defaults included, plus the installed matcher and model package versions, so the bundle metadata shows exactly what the run used. A changed matcher or model version between attempts fails the same check as changed params. This is on purpose: after a version change, start a new run folder. Example (values are placeholders):
 
   ```json
@@ -326,19 +395,20 @@ Implementation details behind the design above.
 
 ### Rules
 
-- Transformation functions are pure. S3 reads and writes happen only in stage functions and in `checkpoint(df, output_path, stage, name)`, which writes to `<run>/<stage>/<name>/` and returns a read of it. That cuts the lineage, so later transformations don't recompute earlier ones and the query plan stays small. Matching checkpoints after blocking, where about 42B spatial pairs shrink to about 170M. Checkpoint outputs stay with the run. With `outputDebug` on, matching also writes `blocking/`, `scores/` and `matches_validated/` under `matching/`, as Scala does at the run root.
-- A DataFrame that two branches of one stage read gets an explicit `.cache()`. In `match_places`, candidates feed both the history pairs and the spatial union.
+- Transformation functions are pure. S3 reads and writes happen only in each theme's `run()`, in `run_stage`, and in the checkpoint function from `io.checkpointer(output_path)`. Calling it as `checkpoint(df, name)` writes `df` to `<run>/<name>/` and returns a read of it. That cuts the lineage, so later transformations don't recompute earlier ones and the query plan stays small. Matching checkpoints after blocking, where about 42B spatial pairs shrink to about 170M. Checkpoint outputs stay with the run. With `outputDebug` on, matching also writes `blocking/`, `scores/` and `matches_validated/` through the same checkpoint function, as Scala does.
+- A DataFrame that two branches of one stage read gets an explicit `.cache()`. In `match_places`, candidates feed both the history pairs and the spatial union. `run_stage` writes each output separately, so upstream work shared by two outputs of one stage gets cached before the stage returns: in `assign_ids`, `final` and `fallout` both come from the cluster winner selection, which Scala caches too.
 - Each stage output's columns are defined by the `select` that produces it, as in Scala (the transformer's required-columns list, the `MatchResult` columns). There is no separate schema validation layer for now; schema tracking across Overture pipelines is an open, org-wide question.
 - Setup functions build one `select` from a list of column expressions. A `withColumn` chain adds one projection per column to the query plan.
 - Boosters and sketch readers load once per executor process, through module-level `functools.cache` loaders keyed by resource name (the blocking booster, the scoring booster, each sketch). The model package is installed on every worker, so UDF closures capture only the resource name, never the loaded object.
 - The model package is a Python package in CodeArtifact, published by tf-places-matcher-model, with the boosters, sketches and manifest as package data. The DAG installs it on every worker at a version pinned by its own Airflow Variable, and `PlacesModel` finds its files with `importlib.resources`. It is not a dependency in this repo's `pyproject.toml`, so a model release does not force a matcher release.
 - The embeddings cache is an Iceberg table, so read it with `spark.table()`. The table name is a `RunConfig` field, so a local run can point it at a temp view of local parquet.
-- Classes hold data and resources only: `RunConfig` (frozen dataclass) and `PlacesModel`. No abstract base classes, no strategy objects, no emulation of typed Datasets.
+- Classes hold data and resources only: `RunConfig` (frozen dataclass), `PlacesModel`, and the stage output `NamedTuple`s. No abstract base classes, no strategy objects, no emulation of typed Datasets.
 - Overrides and history matches are pre-matches (Scala's `preMatch`): pairs accepted before blocking, without scoring. Each theme function calls the shared overrides and history functions it uses. During the port, places calls only the history one (see Known parity traps).
-- From the matching stage, `assign_ids` reads only `matching/matches/`, never matching's checkpoints.
+- From the matching stage, `assign_ids` gets only `MatchingOutput`, never matching's checkpoints.
 - Features live in `places/features.py` and run only in Spark: built-in expressions for blocking features, one UDF for pairwise features (see Performance rules). `PlacesModel.load()` reads the manifest for the thresholds, the spatial radius and the feature order. The manifest also carries the feature names and a feature version, and `load()` asserts both against `features.py`.
-- A test pins each theme's stage names, e.g. `assert [s.__name__ for s in STAGES] == ["setup", "matching", "assign_ids", "metrics"]`, since they're also the folder names readers depend on.
-- Every transformation function has unit tests on a local SparkSession with a few rows. One shared places fixture covers each path through matching: history hit, history miss across a quadkey tile edge, renamed record, candidate-candidate duplicate, deleted baseline, no match, and two baseline records with the same signature.
+- All outputs share one folder namespace. A test checks that output names (the output types' fields plus checkpoint names) are unique and that the output types' fields match Scala's postfixes, since readers depend on them.
+- Stage function names are also marker names, so every theme names its stage functions `setup`, `matching`, `assign_ids` and `metrics`. A test checks this too.
+- Every transformation function and stage has unit tests on a local SparkSession with a few rows. One shared places fixture covers each path through matching: history hit, history miss across a quadkey tile edge, renamed record, candidate-candidate duplicate, deleted baseline, no match, and two baseline records with the same signature.
 - Tests never load the production model package, which is private. A fixture trains a tiny booster with `xgboost` and builds sketches through Spark's JVM sketch classes, both on the fixture rows.
 - The `PlaceTextNormalizer` jar is private too. Fixtures carry the normalized columns precomputed. The few tests that run the normalizer itself carry a `normalizer` marker and skip when the jar is absent; they run locally and in tf-places-matcher-model's CI.
 
@@ -363,9 +433,9 @@ There is no Scala-vs-Scala baseline. No places step depends on row order: ties b
 
 Harness layout: `parity/` sits outside `packages/`, so nothing in it ships to PyPI.
 
-- `compare.py` is a standalone uv script with inline dependencies. It knows both layouts: Scala's flat run folder and the Python job's stage folders. It reads stage parquet with DuckDB, locally or straight from S3, with no Spark, and prints JSON.
+- `compare.py` is a standalone uv script with inline dependencies. Scala and Python run folders share a layout, so it reads both the same way. It reads output parquet with DuckDB, locally or straight from S3, with no Spark, and prints JSON.
 - `test_compare.py` tests it on small local parquet fixtures. Nothing touches AWS.
-- `README.md` gives the plain `aws` CLI commands that start Glue runs, each in its own run folder (a distinct `runId` for Scala, a distinct `outputPath` for Python), and that copy a Scala run's earlier stage outputs into the matching stage folders of a new run folder and write their `_SUCCESS` markers for mixed mode.
+- `README.md` gives the plain `aws` CLI commands that start Glue runs, each in its own run folder (a distinct `runId` for Scala, a distinct `outputPath` for Python), and that copy a Scala run's earlier stage outputs into a new run folder and write their stage markers for mixed mode.
 - The regional test input lives at a private path passed as an argument, never committed.
 
 ### Known parity traps
@@ -384,7 +454,7 @@ Harness layout: `parity/` sits outside `packages/`, so nothing in it ships to Py
 - the DAG stops sending `overrideConfigPath`, which it always set to `none`
 - the job's extra jars are GraphFrames (shaded into the Scala jar today), the `PlaceTextNormalizer` jar, and spark-nlp for divisions. jpostal and libphonenumber drop out: Sedona 1.8.1 ships jpostal, and phones use `phonenumbers`
 - libpostal model data: the Scala job receives it as a Glue extra file, which works only because a JVM job's params pass through as Glue arguments, and a Python job's params do not. Instead, the v1.0.0 model data sits unpacked under an S3 prefix, the job's Spark conf sets `spark.sedona.libpostal.dataDir` to it, and setup calls `sc.addFile(<prefix>, recursive=True)`, Sedona's documented mode for remote data. The `.so` files drop out
-- the DAG stops reading the job's `outputResultFile`. The final path is fixed by the layout (`<outputPath>/assign_ids/final/type=<table>/`), so the DAG builds the `{"<table>": "<path>"}` map itself. The jobs write no result file and ignore an `outputResultFile` param, so cloned Scala arguments still run
+- the DAG stops reading the job's `outputResultFile`. The final path is fixed by the layout (`<outputPath>/final/type=<table>/`), so the DAG builds the `{"<table>": "<path>"}` map itself. The jobs write no result file and ignore an `outputResultFile` param, so cloned Scala arguments still run
 
 ### Local Docker runtime
 
