@@ -34,7 +34,7 @@ At a high level, I'd like to remove the class structure entirely:
 * That job is a chain of *stages*
   * e.g. setup -> matching -> assign_ids -> metrics
   * Each stage writes to its own subdirectory within the run's `MatchBundle` (a new kind of `Bundle`, we were kinda already doing this, but now it's official) using Scala's flat folder layout. I did consider using separate bundles, but matching is typically run all-at-once, and the metadata.json gets needlessly messy if everything is in its own bundle. I think that, in general, 1 DAG run ~ 1 Bundle (lmk if you disagree)
-  * The job writes directly to the bundle's output path. Scala appends `runId` to the output path; the Python job doesn't. Scala also uses `runId` to name the metrics snapshot (`<provider>-<theme>-<runId>`), so the job still takes it for that.
+  * The job writes directly to the bundle's output path (`runId` is not an argument).
   * To track stage success, the bundle has a `_completed_stages` subdirectory that contains success files at `_completed_stages/<stage>` that are written when `<stage>` has finished running. This is how reruns can pick up again partway through the job.
 * Stages are pure functions, too, mapping a `NamedTuple` of dataframes to another `NamedTuple` of dataframes. The orchestration layer sits above this and cand decide whether the functions are just chained together (for local tests) or written to / read from S3 between stages (for runs at scale).
 * Stages are composed of *steps*:
@@ -480,6 +480,7 @@ Harness layout: `parity/` sits outside `packages/`, so nothing in it ships to Py
 
 - params drop the leading dashes (`outputPath`, not `--outputPath`): a Python job receives its params as one JSON object, and `SparkSedonaJob.get_param` looks up bare names
 - the DAG stops sending `overrideConfigPath`, which it always set to `none`
+- the DAG stops sending `runId`. Scala uses it to stamp `snapshot` (`<provider>-<theme>-<runId>`) on every metrics row. Python's metrics rows leave out `snapshot` and `stage`, and `MatcherTelemetryJob` fills both through `TelemetryEmitter`, which already builds the same snapshot from its own `run_id` param
 - the job's extra jars are GraphFrames (shaded into the Scala jar today), the `PlaceTextNormalizer` jar, and spark-nlp for divisions. jpostal and libphonenumber drop out: Sedona 1.8.1 ships jpostal, and phones use `phonenumbers`
 - libpostal model data: the Scala job receives it as a Glue extra file, which works only because a JVM job's params pass through as Glue arguments, and a Python job's params do not. Instead, the v1.0.0 model data sits unpacked under an S3 prefix, the job's Spark conf sets `spark.sedona.libpostal.dataDir` to it, and setup calls `sc.addFile(<prefix>, recursive=True)`, Sedona's documented mode for remote data. The `.so` files drop out
 - the DAG stops reading the job's `outputResultFile`. The final path is fixed by the layout (`<outputPath>/final/type=<table>/`), so the DAG builds the `{"<table>": "<path>"}` map itself. The jobs write no result file and ignore an `outputResultFile` param, so cloned Scala arguments still run
