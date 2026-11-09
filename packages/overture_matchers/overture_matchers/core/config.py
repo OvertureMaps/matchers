@@ -1,14 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 by the Overture Maps Foundation
-"""The run's settings: a frozen dataclass built from the job params.
-
-``RunConfig.for_run`` parses the params, writes ``config.json`` into the run
-folder with the installed package versions, and fails if the folder already
-holds a different ``config.json``. That check stops a rerun with changed
-params (or a changed matcher version) from skipping stages that ran with the
-old ones. ``RunConfig`` lives only on the Spark driver; executors get plain
-values from it.
-"""
+"""Run settings, built from the job params."""
 
 from __future__ import annotations
 
@@ -65,14 +57,8 @@ class RunConfig:
     """Settings for one matching run.
 
     Attributes:
-        output_path: Run folder, the base URI of the run's bundle.
-        input: Candidate paths, ``{table: [paths]}``.
-        baseline: Baseline paths, ``{table: [paths]}``.
-        provider: Name of the provider whose records are matched.
         match_history: Whether candidates with history matches skip scoring.
         output_debug: Whether intermediate outputs are also written.
-        embeddings_cache_table: Table name of the embeddings cache, if any.
-        previous_metrics_path: Metrics of the previous run, if any.
     """
 
     output_path: str
@@ -86,14 +72,9 @@ class RunConfig:
 
     @classmethod
     def from_params(cls, params: dict[str, Any]) -> RunConfig:
-        """Build a config from job params, filling defaults and parsing types.
+        """Build a config from params keyed by Scala's argument names.
 
-        Args:
-            params: Job params keyed by Scala's argument names (``outputPath``,
-                ``matchHistory``, ...). Unknown params are ignored.
-
-        Raises:
-            ValueError: A required param is missing or a value cannot be parsed.
+        Unknown params are ignored.
         """
         values = {
             field: params[param]
@@ -111,7 +92,7 @@ class RunConfig:
         return cls(**values)
 
     def to_json(self) -> str:
-        """Every field, defaults included, plus the installed package versions."""
+        """Every field plus the matcher version."""
         record = asdict(self) | {
             "versions": {"overture-matchers": version("overture-matchers")}
         }
@@ -121,13 +102,10 @@ class RunConfig:
     def for_run(cls, spark: SparkSession, params: dict[str, Any]) -> RunConfig:
         """Build the config and write ``config.json`` to the run folder.
 
-        Args:
-            spark: Session used to reach the run folder.
-            params: Job params, see ``from_params``.
-
         Raises:
-            ValueError: The run folder holds a ``config.json`` that differs.
-                Start a new run folder after changing params or versions.
+            ValueError: The folder holds a different ``config.json``. Without
+                this check, a rerun with changed params would skip stages that
+                ran with the old ones.
         """
         config = cls.from_params(params)
         path = f"{config.output_path.rstrip('/')}/config.json"

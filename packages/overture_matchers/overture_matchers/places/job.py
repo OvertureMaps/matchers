@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 by the Overture Maps Foundation
-"""Places matching job: setup, matching, assign_ids and metrics.
+"""Places matching job.
 
-``PlacesMatchingJob`` runs on Spark and launches ``run``, which reads the inputs
-and chains the four stages through ``run_stage``. The stages are stubs until
-each is ported. Run locally with
-``python -m overture_matchers.places.job <params.json>``.
+Run locally with ``python -m overture_matchers.places.job <params.json>``.
 """
 
 from __future__ import annotations
@@ -64,7 +61,7 @@ def metrics(
 
 
 def run(spark: SparkSession, config: RunConfig) -> None:
-    """Run the places stages, resuming after the last completed one."""
+    """Run the places stages, skipping completed ones."""
     raw = RawInputs(
         spark.read.parquet(*config.input[TABLE]),
         spark.read.parquet(*config.baseline[TABLE]),
@@ -83,10 +80,10 @@ def run(spark: SparkSession, config: RunConfig) -> None:
 
 
 class PlacesMatchingJob(SparkSedonaJob):
-    """The places match task: one job, one cluster, four stages."""
+    """The four-stage place matching job."""
 
     def execute_job(self):
-        """Build the config from the job params and run the stages."""
+        """Run with the job params."""
         run(self.spark, RunConfig.for_run(self.spark, self.result.params))
 
 

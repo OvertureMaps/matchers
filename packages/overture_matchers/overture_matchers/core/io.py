@@ -1,13 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 by the Overture Maps Foundation
-"""Run-folder I/O: Scala's output layout, stage markers and text files.
-
-Outputs sit at ``<output_path>/<name>/type=<table>/`` as zstd parquet, the
-layout Scala's ``JobUtils.writeOutput`` produces, so Scala and Python run
-folders read the same way. Markers sit at ``<output_path>/_completed_stages/``.
-Small text files go through Spark's Hadoop FileSystem
-(``overture_spark.hadoop_fs``), so one code path serves S3 and local runs.
-"""
+"""Run-folder I/O in Scala's layout: ``<output_path>/<name>/type=<table>/``."""
 
 from __future__ import annotations
 
@@ -29,15 +22,12 @@ def _join(output_path: str, *parts: str) -> str:
 
 
 def output_uri(output_path: str, name: str, table: str) -> str:
-    """Location of the output ``name`` for ``table`` inside a run folder."""
+    """URI of an output folder."""
     return _join(output_path, name, f"type={table}")
 
 
 def write_file(spark: SparkSession, uri: str, text: str) -> None:
-    """Write ``text`` to ``uri``, replacing any file there.
-
-    For small files only: the bytes pass through the driver.
-    """
+    """Write a small text file through the driver, replacing any file there."""
     if uri.startswith("s3://"):
         uri = "s3a://" + uri[len("s3://") :]
     path = spark._jvm.org.apache.hadoop.fs.Path(uri)
@@ -50,7 +40,7 @@ def write_file(spark: SparkSession, uri: str, text: str) -> None:
 
 
 def write_output(output_path: str, name: str, table: str, df: DataFrame) -> None:
-    """Write ``df`` as zstd parquet, replacing earlier output."""
+    """Write ``df`` as zstd parquet, with overwrite."""
     df.write.mode("overwrite").option("compression", "zstd").parquet(
         output_uri(output_path, name, table)
     )
@@ -59,7 +49,7 @@ def write_output(output_path: str, name: str, table: str, df: DataFrame) -> None
 def read_output(
     spark: SparkSession, output_path: str, name: str, table: str
 ) -> DataFrame:
-    """A lazy read of the output ``name`` for ``table``."""
+    """Read an output folder."""
     return spark.read.parquet(output_uri(output_path, name, table))
 
 
@@ -68,21 +58,19 @@ def _marker_uri(output_path: str, stage: str) -> str:
 
 
 def stage_is_done(spark: SparkSession, output_path: str, stage: str) -> bool:
-    """Whether ``stage`` has finished in this run folder."""
+    """Whether ``stage`` has a marker."""
     return bool(list_files(spark, _marker_uri(output_path, stage)))
 
 
 def mark_stage_done(spark: SparkSession, output_path: str, stage: str) -> None:
-    """Write the marker that tells reruns to skip ``stage``."""
+    """Write the marker that makes reruns skip ``stage``."""
     write_file(spark, _marker_uri(output_path, stage), "")
 
 
 def checkpointer(spark: SparkSession, output_path: str, table: str) -> Checkpoint:
-    """Build ``checkpoint(df, name)`` for a run folder.
+    """Build ``checkpoint(df, name)``, which writes ``df`` and returns a read of it.
 
-    The returned function writes ``df`` to ``<output_path>/<name>/type=<table>/``
-    and returns a read of it. The read has no lineage back to ``df``, so later
-    transformations do not recompute earlier ones.
+    The read has no lineage back to ``df``, so later steps don't recompute it.
     """
 
     def checkpoint(df: DataFrame, name: str) -> DataFrame:
