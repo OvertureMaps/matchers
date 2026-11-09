@@ -23,6 +23,9 @@ wheels = [
 [[package]]
 name = "overture-matchers"
 source = { editable = "." }
+dependencies = [
+    { name = "overture-spark" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -31,11 +34,21 @@ dev = [
 ]
 
 [package.metadata]
+requires-dist = [{ name = "overture-spark", specifier = ">=0.4.1" }]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "pyspark", specifier = "==3.5.4" },
     { name = "pytest", specifier = ">=8.0" },
+]
+
+[[package]]
+name = "overture-spark"
+version = "0.4.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/08/71/258b4440d698980f456637ada7e0db44c17648b5dd73d341b06371b99568/overture_spark-0.4.1.tar.gz", hash = "sha256:fb2b845a079a9c2dd127cc68ba4a63fbbfd2dc34c8e6ec222a8a7515dace53c4", size = 190638, upload-time = "2026-11-09T17:21:23.352Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/20/6a/e2a04d728dac0f30d6caf38c487c463f07ff4949e2dfbd5931460af42830/overture_spark-0.4.1-py3-none-any.whl", hash = "sha256:812d6fa09b3ac1e8effed9f9cfb583ebc6ddf1b798620936e64841eec3a22f33", size = 22405, upload-time = "2026-11-09T17:21:21.853Z" },
 ]
 
 [[package]]
