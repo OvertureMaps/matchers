@@ -93,6 +93,8 @@ class RunConfig:
         for field in _BOOLS:
             if field in values:
                 values[field] = _parse_bool(values[field])
+        # One spelling, so config.json matches across s3:// and s3a:// attempts.
+        values["output_path"] = io.s3a(values["output_path"])
         for field in _TABLE_MAPS:
             values[field] = _parse_table_map(values[field])
         return cls(**values)

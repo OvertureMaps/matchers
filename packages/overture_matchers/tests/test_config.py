@@ -61,3 +61,8 @@ def test_for_run_accepts_same_params_and_rejects_changed_ones(spark, tmp_path):
     RunConfig.for_run(spark, params)
     with pytest.raises(ValueError, match="different params"):
         RunConfig.for_run(spark, params | {"outputDebug": False})
+
+
+def test_from_params_reads_s3_output_path_as_s3a():
+    config = RunConfig.from_params(PARAMS | {"outputPath": "s3://b/run/"})
+    assert config.output_path == "s3a://b/run/"

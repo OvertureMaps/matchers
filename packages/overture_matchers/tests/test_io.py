@@ -45,24 +45,6 @@ def test_run_uri_reads_s3_as_s3a():
     )
 
 
-def test_read_baseline_adds_soft_deletes_not_still_active(spark, tmp_path):
-    base = str(tmp_path / "base.parquet")
-    spark.createDataFrame(
-        [("a", "p"), ("b", "p")], "id string, provider string"
-    ).write.parquet(base)
-    spark.createDataFrame(
-        [("b", "p"), ("c", "p")], "id string, provider string"
-    ).write.parquet(str(tmp_path / "base_deletes.parquet"))
-    ids = sorted(r.id for r in io.read_baseline(spark, [base]).collect())
-    assert ids == ["a", "b", "c"]
-
-
-def test_read_baseline_without_deletes_reads_active(spark, tmp_path):
-    base = str(tmp_path / "base")
-    spark.range(2).write.parquet(base)
-    assert io.read_baseline(spark, [base]).count() == 2
-
-
 def test_clear_stages_built_on_keeps_upstream_markers(spark, tmp_path):
     out = str(tmp_path)
     for stage in ("setup", "matching", "assign_ids"):

@@ -48,26 +48,6 @@ def read_tables(spark: SparkSession, paths: list[str]) -> DataFrame:
     return spark.read.parquet(*map(s3a, paths))
 
 
-def read_baseline(spark: SparkSession, paths: list[str]) -> DataFrame:
-    """Read a baseline table plus its soft deletes, as Scala's ``loadInput`` does.
-
-    Each path's deletes sit at ``<path without .parquet>_deletes.parquet``. Deleted
-    records whose ``id`` and ``provider`` are still active are dropped.
-    """
-    active = read_tables(spark, paths)
-    deletes_paths = [
-        uri
-        for uri in (p.removesuffix(".parquet") + "_deletes.parquet" for p in paths)
-        if list_files(spark, uri)
-    ]
-    if not deletes_paths:
-        return active
-    deletes = read_tables(spark, deletes_paths).join(
-        active.select("id", "provider"), ["id", "provider"], "left_anti"
-    )
-    return active.unionByName(deletes)
-
-
 def write_output(output_path: str, name: str, table: str, df: DataFrame) -> None:
     """Write ``df`` as zstd parquet, with overwrite."""
     df.write.mode("overwrite").option("compression", "zstd").parquet(

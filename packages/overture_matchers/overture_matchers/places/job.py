@@ -66,7 +66,7 @@ def run(spark: SparkSession, config: RunConfig) -> None:
     spark.sparkContext.setCheckpointDir(io.run_uri(config.output_path, "checkpoints"))
     raw = RawInputs(
         io.read_tables(spark, config.input[TABLE]),
-        io.read_baseline(spark, config.baseline[TABLE]),
+        io.read_tables(spark, config.baseline[TABLE]),
     )
     prepared = run_stage(spark, config, TABLE, setup, raw)
     matched = run_stage(
