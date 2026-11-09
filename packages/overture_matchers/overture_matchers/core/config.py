@@ -17,6 +17,8 @@ from dataclasses import asdict, dataclass
 from importlib.metadata import version
 from typing import TYPE_CHECKING, Any
 
+from overture_spark.hadoop_fs import list_files, read_text
+
 from overture_matchers.core import io
 
 if TYPE_CHECKING:
@@ -138,7 +140,7 @@ class RunConfig:
         config = cls.from_params(params)
         path = f"{config.output_path.rstrip('/')}/config.json"
         record = config.to_json()
-        if io.exists(spark, path) and json.loads(io.read_file(spark, path)) != (
+        if list_files(spark, path) and json.loads(read_text(spark, path)) != (
             json.loads(record)
         ):
             raise ValueError(f"{path} was written with different params")

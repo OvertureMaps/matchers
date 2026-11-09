@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from overture_spark.hadoop_fs import list_files, read_text
+from overture_spark.hadoop_fs import list_files
 
 if TYPE_CHECKING:
     from pyspark.sql import DataFrame, SparkSession
@@ -31,16 +31,6 @@ def _join(output_path: str, *parts: str) -> str:
 def output_uri(output_path: str, name: str, table: str) -> str:
     """Location of the output ``name`` for ``table`` inside a run folder."""
     return _join(output_path, name, f"type={table}")
-
-
-def exists(spark: SparkSession, uri: str) -> bool:
-    """Whether a file, or a directory with at least one file, exists at ``uri``."""
-    return bool(list_files(spark, uri))
-
-
-def read_file(spark: SparkSession, uri: str) -> str:
-    """The UTF-8 text of the file at ``uri``."""
-    return read_text(spark, uri)
 
 
 def write_file(spark: SparkSession, uri: str, text: str) -> None:
@@ -79,7 +69,7 @@ def _marker_uri(output_path: str, stage: str) -> str:
 
 def stage_is_done(spark: SparkSession, output_path: str, stage: str) -> bool:
     """Whether ``stage`` has finished in this run folder."""
-    return exists(spark, _marker_uri(output_path, stage))
+    return bool(list_files(spark, _marker_uri(output_path, stage)))
 
 
 def mark_stage_done(spark: SparkSession, output_path: str, stage: str) -> None:
