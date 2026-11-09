@@ -62,9 +62,11 @@ def metrics(
 
 def run(spark: SparkSession, config: RunConfig) -> None:
     """Run the places stages, skipping completed ones."""
+    # GraphFrames connected components needs a checkpoint directory.
+    spark.sparkContext.setCheckpointDir(io.run_uri(config.output_path, "checkpoints"))
     raw = RawInputs(
-        spark.read.parquet(*config.input[TABLE]),
-        spark.read.parquet(*config.baseline[TABLE]),
+        io.read_tables(spark, config.input[TABLE]),
+        io.read_baseline(spark, config.baseline[TABLE]),
     )
     prepared = run_stage(spark, config, TABLE, setup, raw)
     matched = run_stage(

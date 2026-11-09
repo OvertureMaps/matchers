@@ -33,6 +33,11 @@ _BOOLS = ("match_history", "output_debug")
 _TABLE_MAPS = ("input", "baseline")
 
 
+def _is_unset(value: Any) -> bool:
+    # The DAG sends "none" (or a rendered Python None) for "use the default".
+    return value is None or str(value).strip().lower() in ("", "none")
+
+
 def _parse_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -65,8 +70,9 @@ class RunConfig:
     input: dict[str, list[str]]
     baseline: dict[str, list[str]]
     provider: str
-    match_history: bool = False
-    output_debug: bool = False
+    # Scala's theme configs default both to true.
+    match_history: bool = True
+    output_debug: bool = True
     embeddings_cache_table: str | None = None
     previous_metrics_path: str | None = None
 
@@ -79,7 +85,7 @@ class RunConfig:
         values = {
             field: params[param]
             for param, field in _PARAM_FIELDS.items()
-            if params.get(param) not in (None, "", "none")
+            if not _is_unset(params.get(param))
         }
         missing = [f for f in _REQUIRED if f not in values]
         if missing:
@@ -108,7 +114,7 @@ class RunConfig:
                 ran with the old ones.
         """
         config = cls.from_params(params)
-        path = f"{config.output_path.rstrip('/')}/config.json"
+        path = io.run_uri(config.output_path, "config.json")
         record = config.to_json()
         if list_files(spark, path) and json.loads(read_text(spark, path)) != (
             json.loads(record)

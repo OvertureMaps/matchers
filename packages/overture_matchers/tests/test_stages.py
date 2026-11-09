@@ -10,6 +10,7 @@ from pyspark.sql import functions as F
 
 from overture_matchers.core.config import RunConfig
 from overture_matchers.core.stages import run_stage
+from overture_matchers.places import job
 
 
 class Out(NamedTuple):
@@ -64,3 +65,28 @@ def test_marker_is_written_only_after_all_outputs(spark, tmp_path):
     with pytest.raises(Exception, match="boom"):
         run_stage(spark, make_config(tmp_path), "place", stage)
     assert not (tmp_path / "_completed_stages").exists()
+
+
+def test_rerunning_a_stage_reruns_the_stages_built_on_it(spark, tmp_path):
+    calls = []
+
+    def first() -> Out:
+        calls.append("first")
+        return Out(spark.range(1), spark.range(1))
+
+    def second() -> Out:
+        calls.append("second")
+        return Out(spark.range(1), spark.range(1))
+
+    config = make_config(tmp_path)
+    run_stage(spark, config, "place", first)
+    run_stage(spark, config, "place", second)
+    (tmp_path / "_completed_stages" / "first").unlink()
+    run_stage(spark, config, "place", first)
+    run_stage(spark, config, "place", second)
+    assert calls == ["first", "second", "first", "second"]
+
+
+def test_run_stage_resolves_stages_with_type_checking_only_annotations(spark, tmp_path):
+    with pytest.raises(NotImplementedError, match="matching"):
+        run_stage(spark, make_config(tmp_path), "place", job.matching, None)

@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple, ParamSpec, TypeVar, get_type_hints
+from typing import TYPE_CHECKING, NamedTuple, ParamSpec, TypeVar
 
 from overture_matchers.core import io
 from overture_matchers.core.config import RunConfig
@@ -57,6 +57,13 @@ def no_checkpoint(df: DataFrame, name: str) -> DataFrame:
     return df
 
 
+def _return_type(stage_fn: Callable[..., T]) -> type[T]:
+    # get_type_hints would also resolve the parameter annotations, some of which
+    # name types imported only for type checking.
+    hint = stage_fn.__annotations__["return"]
+    return eval(hint, stage_fn.__globals__) if isinstance(hint, str) else hint
+
+
 def run_stage(
     spark: SparkSession,
     config: RunConfig,
@@ -68,11 +75,13 @@ def run_stage(
     """Run ``stage_fn`` unless its marker exists, and return reads of its outputs.
 
     ``stage_fn.__name__`` names the marker, and its return annotation names the
-    outputs. The marker is written only after every output.
+    outputs. The marker is written only after every output. Running a stage
+    deletes the markers of stages built on its earlier run.
     """
     stage = stage_fn.__name__
-    output_type = get_type_hints(stage_fn)["return"]
+    output_type = _return_type(stage_fn)
     if not io.stage_is_done(spark, config.output_path, stage):
+        io.clear_stages_built_on(spark, config.output_path, stage)
         outputs = stage_fn(*args, **kwargs)
         for name, df in outputs._asdict().items():
             io.write_output(config.output_path, name, table, df)

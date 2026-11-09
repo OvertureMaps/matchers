@@ -50,6 +50,7 @@ def test_job_writes_config_then_stops_at_first_stub(spark, tmp_path, params):
     result = runner.run(params)
     assert isinstance(result.exception, NotImplementedError)
     assert (tmp_path / "run" / "config.json").is_file()
+    assert "/run/checkpoints/" in spark.sparkContext.getCheckpointDir()
     assert not (tmp_path / "run" / "_completed_stages").exists()
 
 
