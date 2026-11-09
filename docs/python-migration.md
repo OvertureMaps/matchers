@@ -14,10 +14,10 @@ This final major section of this document is titled "Details for agents" -- as t
 
 This is just a summary of how the Scala matching works today:
 
-- `Main` runs four stages chosen by `--stages`: setup, matching, assignid, metrics. Stages hand off only through folders under the run's S3 output path (`candidates/`, `baseline/`, `matches/`, `final/`, `fallout/`, `metrics/`).
+- `Main` runs four stages chosen by `--stages`: setup, matching, assignid, metrics. Stages hand off only through folders under the run's S3 output path (`candidates/`, `baseline/`, `matches/`, `final/`, `fallout/`, `metrics/`). With `outputDebug` on, matching also writes `blocking/`, `scores/` and `matches_validated/`, and assignid writes `idMap/` (each candidate's `id` and `assigned_id`). The parity harness reads `idMap/`.
 - Each stage calls the slots of a `Theme` (Transformer, HistoryFilter, EmbeddingsGenerator, Matcher, IdAssignmentPipeline). The config JSON in `resources/configs/` picks each slot's class.
 - Matchers form an inheritance chain: `PlacesUnionedMatcher extends PlacesMatcher extends Matcher`, and each level overrides most of the one above.
-  - `PlacesUnionedMatcher` (production places) unions candidates and baseline, spatially self-joins within 400 m (Sedona), prunes with an XGBoost blocking model (p ≥ 0.08), scores with a 28-feature XGBoost model (p ≥ 0.48), and clusters with GraphFrames connected components. History matches skip blocking.
+  - `PlacesUnionedMatcher` (production places) unions candidates and baseline, spatially self-joins within 400 m (Sedona), prunes with an XGBoost blocking model (p ≥ 0.08), scores with a 28-feature XGBoost model (p ≥ 0.48), and clusters with GraphFrames connected components. Candidates with history matches skip blocking and scoring. Their history pairs join the scored pairs after the model, with `composite_score` and `prediction` set to 1.
   - `PlacesMatcher` is used only by the places-signals config: quadkey tile blocking with a name filter, candidate-to-baseline pairs only, best baseline per candidate. It is stale (OvertureMaps/overture-matchers#431).
   - `DivisionsMatcher`: quadkey blocking per subtype, rule-based scores in `Matcher.scala`, per-subtype thresholds, greedy restricted-duplicates selection.
   - `AddressesMatcher`: tier 1 exact signature match, tier 2 H3 res-14 blocking, street and house-number pre-score with a top-50 cut, weighted composite (max of two weightings), threshold 0.95, best baseline per candidate.
@@ -330,12 +330,13 @@ Each package is versioned from its own `<package>-v<version>` tags through pytho
 
 `compare.py` compares two run folders and reports, for people to review:
 
-1. ID agreement: the share of candidates that get the same ID in both runs, overall and broken down by country and by match type. A candidate agrees when both runs reuse the same GERS ID, or both mint a new ID for the same group of candidates. New IDs are random, so their values are never compared. A candidate missing from either run counts as a disagreement.
+1. ID agreement: the share of candidates with the same outcome in both runs, overall and broken down by country and by match type. A candidate agrees when both runs reuse the same GERS ID, both mint a new ID for the same group of candidates, or both drop it as a duplicate of the same record (fallout). New IDs are random, so their values are never compared. A candidate missing from either run's `idMap/` and `fallout/` counts as a disagreement.
 2. Cluster agreement: of the record pairs one run groups together, the share the other run also groups together, measured in both directions. GraphFrames `cluster_id` values are arbitrary, so only which records share a cluster counts.
 
 Method, set up before any porting:
 
 - A fixed regional test input, large enough to cover several countries and scripts.
+- A second pair of runs with `matchHistory` off. In the reference places run, 57.5M of 61.5M candidates are history matched, and those skip blocking and scoring, so a comparison with history matching on mostly checks history matching.
 - Pin both sides to the same model. The Scala jar shades in its model version (`places.matcher.model.version` in its `pom.xml`), so a Python-vs-Scala run pins the model package to that version.
 - Mixed mode: copy a Scala run's earlier stage outputs into a new run folder at the same paths, write markers for those stages, and run the Python job. It skips the marked stages, so differences in the next stage's output come from that stage alone. A comparison of one stage's outputs gets built when matching is ported, shaped by what that work needs. Mixed mode is a development tool only; production never mixes Scala and Python stages.
 
@@ -423,7 +424,7 @@ Implementation details behind the design above.
 
 ### Rules
 
-- Transformation functions are pure. S3 reads and writes happen only in each theme's `run()`, in `run_stage`, and in the checkpoint function from `io.checkpointer(output_path)`. Calling it as `checkpoint(df, name)` writes `df` to `<run>/<name>/` and returns a read of it. That cuts the lineage, so later transformations don't recompute earlier ones and the query plan stays small. Matching checkpoints after blocking, where about 42B spatial pairs shrink to about 170M. Checkpoint outputs stay with the run. With `outputDebug` on, matching also writes `blocking/`, `scores/` and `matches_validated/` through the same checkpoint function, as Scala does.
+- Transformation functions are pure. S3 reads and writes happen only in each theme's `run()`, in `run_stage`, and in the checkpoint function from `io.checkpointer(output_path)`. Calling it as `checkpoint(df, name)` writes `df` to `<run>/<name>/` and returns a read of it. That cuts the lineage, so later transformations don't recompute earlier ones and the query plan stays small. Matching checkpoints after blocking, where about 42B spatial pairs shrink to about 170M. Checkpoint outputs stay with the run. With `outputDebug` on, matching also writes `blocking/`, `scores/` and `matches_validated/`, and `assign_ids` writes `idMap/`, through the same checkpoint function, as Scala does.
 - A DataFrame that two branches of one stage read gets an explicit `.cache()`. In `match_places`, candidates feed both the history pairs and the spatial union. `run_stage` writes each output separately, so upstream work shared by two outputs of one stage gets cached before the stage returns: in `assign_ids`, `final` and `fallout` both come from the cluster winner selection, which Scala caches too.
 - Each stage output's columns are defined by the `select` that produces it, as in Scala (the transformer's required-columns list, the `MatchResult` columns). There is no separate schema validation layer for now; schema tracking across Overture pipelines is an open, org-wide question.
 - Setup functions build one `select` from a list of column expressions. A `withColumn` chain adds one projection per column to the query plan.

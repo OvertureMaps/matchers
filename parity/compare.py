@@ -10,9 +10,11 @@ A_RUN (usually Scala) and B_RUN (usually Python) are the folders a run writes
 its stage outputs to, laid out as `<stage output>/type=<feature_type>/`. Both runs
 need `outputDebug=true` for the ID map. The report has two parts:
 
-  ids     share of candidate records that get the same ID in both runs, overall
-          and broken down by country and by match type. New IDs are random, so
-          two new IDs count as the same when they cover the same records.
+  ids     share of candidate records with the same outcome in both runs, overall
+          and broken down by country and by match type. The outcome is the
+          assigned ID, or falling out as a duplicate of another record. New IDs
+          are random, so two new IDs count as the same when they cover the same
+          records.
   groups  how far the runs agree on which records belong together. Group IDs
           are arbitrary, so the report counts pairs of records grouped together
           in each run, and the share of each run's pairs the other run also has.
@@ -56,14 +58,18 @@ def share(num: int, den: int) -> float:
 def create_ids_view(
     con: duckdb.DuckDBPyConnection, run_label: str, run: str, feature_type: str
 ) -> None:
-    """Create the `a_ids` or `b_ids` view: each candidate's assigned ID, whether it came from the baseline, and a hash of the candidates sharing it.
+    """Create the `a_ids` or `b_ids` view: each candidate's outcome in one run.
+
+    A candidate either gets an ID (from `idMap`) or falls out as a duplicate
+    of another candidate (from `fallout`). For an assigned ID, the view says
+    whether it came from the baseline and hashes the candidates sharing it.
 
     The view looks like:
-        id    assigned_id    got_baseline_id    new_id_group_hash
-        ----  -------------  -----------------  -----------------
-        1     100            true               1234567890
-        2     100            true               1234567890
-        3     101            false              9876543210
+        id    assigned_id    got_baseline_id    new_id_group_hash    duplicate_of
+        ----  -------------  -----------------  -------------------  ------------
+        1     100            true               1234567890           NULL
+        2     101            false              9876543210           NULL
+        3     NULL           NULL               NULL                 1
 
     Args:
         con: DuckDB connection.
@@ -78,8 +84,12 @@ def create_ids_view(
                assigned_id IN (SELECT id FROM {scan(run, "baseline", feature_type)}) AS got_baseline_id,
                -- XOR all of the ids in a group to get a deterministic order-independent fingerprint of the group
                -- I guess this risks hash collisions, but it's a 64-bit hash, so the probability is very low.
-               bit_xor(hash(id)) OVER (PARTITION BY assigned_id) AS new_id_group_hash
+               bit_xor(hash(id)) OVER (PARTITION BY assigned_id) AS new_id_group_hash,
+               NULL AS duplicate_of
         FROM m
+        UNION ALL
+        SELECT DISTINCT id, NULL, NULL, NULL, duplicate_of
+        FROM {scan(run, "fallout", feature_type)}
     """)
 
 
@@ -122,9 +132,9 @@ def create_candidates_with_match_type_view(
 def id_agreement(
     con: duckdb.DuckDBPyConnection, breakdown_column: str | None = None
 ) -> list[tuple]:
-    """Share of candidates with the same ID in both runs, largest group first.
+    """Share of candidates with the same outcome in both runs, largest group first.
 
-    A candidate missing from either run's idMap counts as different.
+    A candidate missing from either run's idMap and fallout counts as different.
 
     Args:
         con: Connection holding the `a_ids`, `b_ids` and `candidates_with_match_type` views.
@@ -140,6 +150,7 @@ def id_agreement(
     return con.execute(f"""
         SELECT {value_expr}, count(*),
                avg(CAST(coalesce(CASE
+                   WHEN a.duplicate_of IS NOT NULL OR b.duplicate_of IS NOT NULL THEN a.duplicate_of = b.duplicate_of
                    WHEN a.got_baseline_id AND b.got_baseline_id THEN a.assigned_id = b.assigned_id
                    WHEN NOT a.got_baseline_id AND NOT b.got_baseline_id THEN a.new_id_group_hash = b.new_id_group_hash
                    ELSE false END, false) AS INT))
