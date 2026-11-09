@@ -49,11 +49,11 @@ def write_file(spark: SparkSession, uri: str, text: str) -> None:
         stream.close()
 
 
-def write_output(output_path: str, name: str, table: str, df: DataFrame) -> str:
-    """Write ``df`` as zstd parquet, replacing earlier output. Returns its URI."""
-    uri = output_uri(output_path, name, table)
-    df.write.mode("overwrite").option("compression", "zstd").parquet(uri)
-    return uri
+def write_output(output_path: str, name: str, table: str, df: DataFrame) -> None:
+    """Write ``df`` as zstd parquet, replacing earlier output."""
+    df.write.mode("overwrite").option("compression", "zstd").parquet(
+        output_uri(output_path, name, table)
+    )
 
 
 def read_output(

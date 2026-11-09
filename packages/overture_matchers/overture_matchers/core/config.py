@@ -24,8 +24,6 @@ from overture_matchers.core import io
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
 
-PACKAGES_RECORDED = ("overture-matchers",)
-
 # Job param (Scala's argument name) -> field. Params outside this table are ignored,
 # so argument sets cloned from Scala runs still work.
 _PARAM_FIELDS = {
@@ -33,8 +31,6 @@ _PARAM_FIELDS = {
     "input": "input",
     "baseline": "baseline",
     "provider": "provider",
-    "scenario": "scenario",
-    "environment": "environment",
     "matchHistory": "match_history",
     "outputDebug": "output_debug",
     "embeddingsCacheTable": "embeddings_cache_table",
@@ -73,8 +69,6 @@ class RunConfig:
         input: Candidate paths, ``{table: [paths]}``.
         baseline: Baseline paths, ``{table: [paths]}``.
         provider: Name of the provider whose records are matched.
-        scenario: Matching scenario label.
-        environment: Deployment environment label.
         match_history: Whether candidates with history matches skip scoring.
         output_debug: Whether intermediate outputs are also written.
         embeddings_cache_table: Table name of the embeddings cache, if any.
@@ -85,8 +79,6 @@ class RunConfig:
     input: dict[str, list[str]]
     baseline: dict[str, list[str]]
     provider: str
-    scenario: str = "overture"
-    environment: str = "dev"
     match_history: bool = False
     output_debug: bool = False
     embeddings_cache_table: str | None = None
@@ -121,7 +113,7 @@ class RunConfig:
     def to_json(self) -> str:
         """Every field, defaults included, plus the installed package versions."""
         record = asdict(self) | {
-            "versions": {name: version(name) for name in PACKAGES_RECORDED}
+            "versions": {"overture-matchers": version("overture-matchers")}
         }
         return json.dumps(record, indent=2, sort_keys=True)
 
