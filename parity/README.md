@@ -24,13 +24,14 @@ aws glue start-job-run --job-name SCALA_JOB \
     --arguments '{"--runId":"scala-1","--outputPath":"s3://BUCKET/parity","--outputDebug":"true"}'
 ```
 
-One stage at a time: copy a Scala run's earlier stage outputs into a new run folder, run only the next stage there, and compare.
+One stage at a time: copy a Scala run's earlier stage outputs into a new run folder, write a marker for each copied stage, and run the Python job there. It skips the marked stages. Each marker holds the names of the stages before it, one per line (`_completed_stages/matching` holds `setup`), so rerunning an earlier stage clears the markers built on it.
 
 ```bash
 for f in candidates baseline embeddings; do
     aws s3 cp --recursive s3://BUCKET/parity/scala-1/$f s3://BUCKET/parity/py-1/$f
 done
+printf '' | aws s3 cp - s3://BUCKET/parity/py-1/_completed_stages/setup
 aws glue start-job-run --job-name PYTHON_JOB \
-    --arguments '{"--outputPath":"s3://BUCKET/parity/py-1","--stages":"matching,assignid","--outputDebug":"true"}'
+    --arguments '{"--outputPath":"s3://BUCKET/parity/py-1","--outputDebug":"true"}'
 uv run parity/compare.py s3://BUCKET/parity/scala-1 s3://BUCKET/parity/py-1
 ```
