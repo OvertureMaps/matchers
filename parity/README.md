@@ -24,7 +24,7 @@ aws glue start-job-run --job-name SCALA_JOB \
     --arguments '{"--runId":"scala-1","--outputPath":"s3://BUCKET/parity","--outputDebug":"true"}'
 ```
 
-One stage at a time: copy a Scala run's earlier stage outputs into a new run folder, write a marker for each copied stage, and run the Python job there. It skips the marked stages. Each marker holds the names of the stages before it, one per line (`_completed_stages/matching` holds `setup`), so rerunning an earlier stage clears the markers built on it.
+One stage at a time: copy a Scala run's earlier stage outputs into a new run folder, write a marker for each copied stage, and run the Python job there. It skips the marked stages. A marker is an empty file at `_completed_stages/<stage>`.
 
 ```bash
 for f in candidates baseline embeddings; do

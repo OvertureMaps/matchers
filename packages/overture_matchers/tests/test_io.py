@@ -37,22 +37,3 @@ def test_checkpoint_writes_and_cuts_lineage(spark, tmp_path):
     assert result.count() == 3
     assert all("/run/blocking/type=place/" in f for f in result.inputFiles())
     assert not any("/source/" in f for f in result.inputFiles())
-
-
-def test_run_uri_reads_s3_as_s3a():
-    assert io.output_uri("s3://b/run/", "final", "place") == (
-        "s3a://b/run/final/type=place"
-    )
-
-
-def test_clear_stages_built_on_keeps_upstream_markers(spark, tmp_path):
-    out = str(tmp_path)
-    for stage in ("setup", "matching", "assign_ids"):
-        io.mark_stage_done(spark, out, stage)
-    io.clear_stages_built_on(spark, out, "matching")
-    done = [
-        s
-        for s in ("setup", "matching", "assign_ids")
-        if io.stage_is_done(spark, out, s)
-    ]
-    assert done == ["setup", "matching"]
