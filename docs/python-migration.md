@@ -121,12 +121,15 @@ def matching(
     prepared: SetupOutput,
     model: PlacesModel,
     embeddings: DataFrame | None = None,
-    match_history: bool = False,
-    output_debug: bool = False,
+    match_history: bool = True,
+    output_debug: bool = True,
     checkpoint: Checkpoint = no_checkpoint,
 ) -> MatchingOutput: ...  # pairs, scoring, clusters
 def assign_ids(
-    raw: RawInputs, prepared: SetupOutput, matched: MatchingOutput
+    raw: RawInputs,
+    prepared: SetupOutput,
+    matched: MatchingOutput,
+    checkpoint: Checkpoint = no_checkpoint,
 ) -> AssignIdsOutput: ...  # cluster winners, GERS IDs
 def metrics(
     raw, prepared, matched, ids, previous
@@ -136,28 +139,36 @@ def metrics(
 Then, after each stage is defined (for a specific theme), that theme's `run()` wires them together. It starts by prepping all the pipeline inputs (input data, model, embeddings, previous metrics), and then chains together a bunch of `run_stage` calls:
 
 ```python
+TABLE = "place"  # Scala's output tables are partitioned by type=<table>
+
+
 def run(spark, config):
     raw = RawInputs(
         read_tables(spark, config.input), read_tables(spark, config.baseline)
     )
     model = PlacesModel.load()
+    checkpoint = io.checkpointer(spark, config.output_path, TABLE)
 
-    prepared = run_stage(spark, config, setup, raw)
+    prepared = run_stage(spark, config, TABLE, setup, raw)
     matched = run_stage(
         spark,
         config,
+        TABLE,
         matching,
         prepared,
         model,
         embeddings=read_embeddings(spark, config),  # None when no table is set
         match_history=config.match_history,
         output_debug=config.output_debug,
-        checkpoint=io.checkpointer(config.output_path),
+        checkpoint=checkpoint,
     )
-    ids = run_stage(spark, config, assign_ids, raw, prepared, matched)
+    ids = run_stage(
+        spark, config, TABLE, assign_ids, raw, prepared, matched, checkpoint=checkpoint
+    )
     run_stage(
         spark,
         config,
+        TABLE,
         metrics,
         raw,
         prepared,
@@ -169,7 +180,7 @@ def run(spark, config):
 
 class PlacesMatchingJob(SparkSedonaJob):
     def execute_job(self):
-        run(self.spark, RunConfig.for_run(self.params))
+        run(self.spark, RunConfig.for_run(self.spark, self.result.params))
 
 
 if __name__ == "__main__":
@@ -179,13 +190,12 @@ if __name__ == "__main__":
 `run_stage` is shared by all themes in `core/`; it does a few things:
 * It skips any stage that has a marker present
 * It calls the stage function with all the necessary arguments
-* It writes the stage output to S3 along with a success marker in `completed_stages/<stage>`
+* It writes the stage output to S3 as zstd-compressed parquet, as Scala does, at `<postfix>/type=<table>/`, along with a success marker in `_completed_stages/<stage>`
 * It "reads" back the written outputs and returns the `DataFrame`s. Parquet reads are lazily eval'd by Spark, so this shouldn't incur any costs on the final stage.
 
 It also uses `ParamSpec` / `TypeVar` from Python 3.10+ for better type hinting.
 
 ```python
-Checkpoint = Callable[[DataFrame, str], DataFrame]
 P = ParamSpec("P")
 T = TypeVar("T")
 
@@ -195,21 +205,26 @@ def no_checkpoint(df, name):
 
 
 def run_stage(
-    spark, config, stage_fn: Callable[P, T], *args: P.args, **kwargs: P.kwargs
+    spark,
+    config,
+    table: str,
+    stage_fn: Callable[P, T],
+    *args: P.args,
+    **kwargs: P.kwargs,
 ) -> T:
     stage = stage_fn.__name__
     output_type = get_type_hints(stage_fn)["return"]
-    if not io.stage_is_done(config.output_path, stage):
+    if not io.stage_is_done(spark, config.output_path, stage):
         outputs = stage_fn(*args, **kwargs)
         for name, df in outputs._asdict().items():
-            io.write_output(config.output_path, name, df)
+            io.write_output(config.output_path, name, table, df)
         io.mark_stage_done(
-            config.output_path, stage
+            spark, config.output_path, stage
         )  # writes _completed_stages/<stage>
         spark.catalog.clearCache()  # everything is on S3 between stages
     return output_type(
         *(
-            io.read_output(spark, config.output_path, name)
+            io.read_output(spark, config.output_path, name, table)
             for name in output_type._fields
         )
     )
@@ -217,7 +232,8 @@ def run_stage(
 
 def run_local(run, params_file):
     params = json.loads(Path(params_file).read_text())
-    run(local_sedona_session(), RunConfig.for_run(params))
+    spark = local_sedona_session()
+    run(spark, RunConfig.for_run(spark, params))
 ```
 
 To explore, you can call a stage function directly, e.g. `matching(SetupOutput(my_candidates, my_baseline), model)`. With the default `no_checkpoint` this doesn't write anything, which is fine for small datasets.
@@ -225,8 +241,11 @@ To explore, you can call a stage function directly, e.g. `matching(SetupOutput(m
 Where the little `io` helper has functions like:
 
 ```python
-def stage_is_done(output_path, stage_name):
-    return exists(f"{output_path}/_completed_stages/{stage_name}")
+Checkpoint = Callable[[DataFrame, str], DataFrame]
+
+
+def stage_is_done(spark, output_path, stage_name):
+    return exists(spark, f"{output_path}/_completed_stages/{stage_name}")
 ```
 
 And `RunConfig` is pretty flat; it looks something like:
@@ -238,16 +257,18 @@ class RunConfig:
     input: dict[str, list[str]]  # table -> paths
     baseline: dict[str, list[str]]
     output_path: str  # bundle base
-    match_history: bool = False
-    output_debug: bool = False
+    match_history: bool = True  # Scala's theme configs set both to true
+    output_debug: bool = True
     # ...
 
     @classmethod
-    def for_run(cls, params):
+    def for_run(cls, spark, params):
         config = cls.from_params(params)
         path = f"{config.output_path}/config.json"
         record = config.to_json()  # also records installed package versions
-        if io.exists(path) and io.read(path) != record:
+        if io.exists(spark, path) and json.loads(io.read(spark, path)) != json.loads(
+            record
+        ):
             raise ValueError(f"{path} was written with different params")
         io.write(path, record)
         return config
@@ -286,9 +307,9 @@ packages/
   overture_matchers/
     overture_matchers/
       core/              # run plumbing only, no matching logic
-        config.py        # frozen dataclass RunConfig, built from the job params
-        io.py            # read_output/write_output, checkpoint, stage markers, config.json write and check
-        stages.py        # stage output types, run_stage, run_local, Checkpoint
+        config.py        # frozen dataclass RunConfig, built from the job params; config.json write and check
+        io.py            # read_output/write_output, Checkpoint and checkpointer, stage markers
+        stages.py        # stage output types, run_stage, run_local
       clustering.py      # connected components, greedy, simple
       ids.py             # GERS ID minting
       prematch.py        # overrides and history pre-matches
@@ -384,7 +405,7 @@ Each theme cuts over to Python as a whole, once all its stages pass parity. Over
 - Training and features, after the migration: where the single copy of the feature code lives, and how a model and the feature code it was trained on are kept in step. One option is for tf-places-matcher-model to import `places/features.py` from this repo. The other is for this repo to import the training repo's feature code as an optional dependency, which needs CodeArtifact access in CI and faster feature code in the training repo. Today `FeatureParityTest.scala` recomputes the model jar's `test_dataset.parquet` features in the matcher's CI.
 - Not yet measured: divisions and addresses prod volumes, the 3PPP/signals pipeline.
 - Parity acceptance: what each stage's comparison checks and what difference is acceptable before a theme cuts over.
-- A mapping of every Scala, DAG and `just match` param to its `RunConfig` field, theme constant, Spark setting, or removal.
+- A mapping of every Scala, DAG and `just match` param to its `RunConfig` field, theme constant, Spark setting, or removal. It includes `inputsFromFile`, which Scala accepts as an alternative to `input` and the addresses DAG uses.
 - OvertureMaps/overture-embeddings (Python) owns the embedding model pin, int8 quantization, cosine scoring and text normalization. Check whether the places embedding feature can use it before porting `EmbeddingCacheCosineSimilarityCalculator`.
 
 ## Details for agents
@@ -404,7 +425,7 @@ Implementation details behind the design above.
 - The job starts with `RunConfig.for_run(params)`, which builds `RunConfig` from the params and writes `config.json` before reading any input. If the run folder already has a `config.json` that differs, the job fails. Otherwise a rerun with changed params would skip stages that ran with the old ones. Apart from that check, nothing reads `config.json` back: a retry gets the same params from Airflow and builds the same config. Anything resolved at run time (a "latest" baseline, a timestamp) is resolved in the DAG and passed in as a param, so the job never resolves anything on its own.
 - Every stage write uses `mode("overwrite")`, so rerunning a stage without a marker replaces whatever a failed attempt left behind.
 - `run_stage` writes a stage's marker after all of the stage's outputs are written, and clears Spark's cache before the next stage. Spark's own `_SUCCESS` files mark single DataFrame writes, so they never stand in for a stage marker.
-- `config.json` lists every field, defaults included, plus the installed matcher and model package versions, so the bundle metadata shows exactly what the run used. A changed matcher or model version between attempts fails the same check as changed params. This is on purpose: after a version change, start a new run folder. Example (values are placeholders):
+- `config.json` lists every field, defaults included, plus the installed matcher and model package versions, so the bundle metadata shows exactly what the run used. A changed matcher or model version between attempts fails the same check as changed params. This is on purpose: after a version change, start a new run folder. Uncommitted local edits keep the same version string, so a local rerun with edited code still resumes. Example (values are placeholders):
 
   ```json
   {
@@ -412,8 +433,6 @@ Implementation details behind the design above.
     "input": {"place": ["s3://.../candidates/"]},
     "baseline": {"place": ["s3://.../baseline/"]},
     "provider": "<provider>",
-    "scenario": "<scenario>",
-    "environment": "prod",
     "match_history": true,
     "output_debug": false,
     "embeddings_cache_table": null,
@@ -476,11 +495,13 @@ Harness layout: `parity/` sits outside `packages/`, so nothing in it ships to Py
 5. String semantics: commons-text Levenshtein counts UTF-16 units; Spark's `levenshtein()` and Python's `Levenshtein`/`rapidfuzz` count code points. They differ only on emoji and other non-BMP characters. Accept and document it; training already uses code points.
 6. Java and Python `unidecode` tables differ. Keep `PlaceTextNormalizer` on the JVM to avoid this.
 7. Float details (division order, `log` in idf, float vs double) can flip pairs sitting exactly at a threshold. These differences are expected and get reviewed.
+8. Scala never loads the baseline's soft deletes. `JobUtils.loadInput` tries to union the `_deletes` table, but it reads `loadedData(table)` before assigning it, so the lookup throws and the `catch` returns the active data. Read the baseline like the input. Decide separately whether to add soft deletes.
 
 ### tf-data-platform DAG changes
 
 - params drop the leading dashes (`outputPath`, not `--outputPath`): a Python job receives its params as one JSON object, and `SparkSedonaJob.get_param` looks up bare names
 - the DAG stops sending `overrideConfigPath`, which it always set to `none`
+- the DAG stops sending `scenario` and `environment`. `scenario` only feeds Scala's H3 ID generator, which places doesn't use, and `environment` only flags Scala's local test runs
 - the DAG stops sending `runId`. Scala uses it to stamp `snapshot` (`<provider>-<theme>-<runId>`) on every metrics row. Python's metrics rows leave out `snapshot` and `stage`, and `MatcherTelemetryJob` fills both through `TelemetryEmitter`, which already builds the same snapshot from its own `run_id` param
 - the job's extra jars are GraphFrames (shaded into the Scala jar today), the `PlaceTextNormalizer` jar, and spark-nlp for divisions. jpostal and libphonenumber drop out: Sedona 1.8.1 ships jpostal, and phones use `phonenumbers`
 - libpostal model data: the Scala job receives it as a Glue extra file, which works only because a JVM job's params pass through as Glue arguments, and a Python job's params do not. Instead, the v1.0.0 model data sits unpacked under an S3 prefix, the job's Spark conf sets `spark.sedona.libpostal.dataDir` to it, and setup calls `sc.addFile(<prefix>, recursive=True)`, Sedona's documented mode for remote data. The `.so` files drop out
