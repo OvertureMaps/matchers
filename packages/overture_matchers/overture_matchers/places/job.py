@@ -31,8 +31,8 @@ if TYPE_CHECKING:
 TABLE = "place"
 
 
-def setup(raw: RawInputs) -> SetupOutput:
-    """Normalize candidates and baseline."""
+def setup(raw: RawInputs, match_history: bool = True) -> SetupOutput:
+    """Normalize candidates and baseline, and attach history matches if asked."""
     raise NotImplementedError("places setup is not ported yet")
 
 
@@ -67,6 +67,8 @@ def run(spark: SparkSession, config: RunConfig) -> None:
     """Run the places stages, skipping completed ones."""
     if TABLE not in config.input or TABLE not in config.baseline:
         raise ValueError(f"input and baseline need a {TABLE!r} entry")
+    if config.model_jar is None:
+        raise ValueError("places needs the modelJar param")
     # GraphFrames connected components needs a checkpoint directory.
     spark.sparkContext.setCheckpointDir(io.run_uri(config.output_path, "checkpoints"))
     raw = RawInputs(
@@ -74,7 +76,9 @@ def run(spark: SparkSession, config: RunConfig) -> None:
         spark.read.parquet(*config.baseline[TABLE]),
     )
     checkpoint = io.checkpointer(spark, config.output_path, TABLE)
-    prepared = run_stage(spark, config, TABLE, setup, raw)
+    prepared = run_stage(
+        spark, config, TABLE, setup, raw, match_history=config.match_history
+    )
     matched = run_stage(spark, config, TABLE, matching, prepared, checkpoint=checkpoint)
     ids = run_stage(
         spark, config, TABLE, assign_ids, raw, prepared, matched, checkpoint=checkpoint

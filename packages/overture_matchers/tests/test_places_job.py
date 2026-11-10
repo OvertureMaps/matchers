@@ -41,6 +41,7 @@ def params(spark, tmp_path):
         "input": {"place": [str(tmp_path / "candidates")]},
         "baseline": {"place": [str(tmp_path / "baseline")]},
         "provider": "acme",
+        "modelJar": "/tmp/model.jar",
     }
 
 
@@ -58,6 +59,25 @@ def test_run_rejects_inputs_without_a_place_entry(spark, tmp_path, params):
     params["input"] = {"building": params["input"]["place"]}
     with pytest.raises(ValueError, match="'place' entry"):
         job.run(spark, job.RunConfig.from_params(params))
+
+
+def test_run_rejects_a_missing_model_jar(spark, params):
+    del params["modelJar"]
+    with pytest.raises(ValueError, match="modelJar"):
+        job.run(spark, job.RunConfig.from_params(params))
+
+
+def test_run_passes_match_history_to_setup(spark, params, monkeypatch):
+    seen = []
+
+    def setup(raw, match_history=True) -> SetupOutput:
+        seen.append(match_history)
+        raise NotImplementedError
+
+    monkeypatch.setattr(job, "setup", setup)
+    with pytest.raises(NotImplementedError):
+        job.run(spark, job.RunConfig.from_params(params | {"matchHistory": "false"}))
+    assert seen == [False]
 
 
 def test_run_local_reads_params_file(spark, tmp_path, params):

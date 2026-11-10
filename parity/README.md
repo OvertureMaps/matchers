@@ -37,7 +37,7 @@ cat > params.json <<'EOF'
   "input": {"place": ["s3://BUCKET/CANDIDATES/"]},
   "baseline": {"place": ["s3://BUCKET/BASELINE/"]},
   "provider": "PROVIDER",
-  "outputDebug": "true"
+  "modelJar": "s3://BUCKET/MODEL_JAR"
 }
 EOF
 python -m overture_matchers.places.job params.json

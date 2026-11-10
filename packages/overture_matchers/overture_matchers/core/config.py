@@ -27,6 +27,7 @@ _PARAM_FIELDS = {
     "outputDebug": "output_debug",
     "embeddingsCacheTable": "embeddings_cache_table",
     "previousMetricsPath": "previous_metrics_path",
+    "modelJar": "model_jar",
 }
 _REQUIRED = ("output_path", "input", "baseline", "provider")
 _BOOLS = ("match_history", "output_debug")
@@ -63,7 +64,8 @@ class RunConfig:
 
     Attributes:
         match_history: Whether candidates with history matches skip scoring.
-        output_debug: Whether intermediate outputs are also written.
+        output_debug: Scala's debug flag. Intermediate outputs are always written.
+        model_jar: The ``places-matcher-model`` jar. Only places reads it.
     """
 
     output_path: str
@@ -75,6 +77,7 @@ class RunConfig:
     output_debug: bool = True
     embeddings_cache_table: str | None = None
     previous_metrics_path: str | None = None
+    model_jar: str | None = None
 
     @classmethod
     def from_params(cls, params: dict[str, Any]) -> RunConfig:
