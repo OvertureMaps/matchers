@@ -12,11 +12,13 @@ You need [uv](https://docs.astral.sh/uv/) and Java 17, which the tests' local Sp
 
 ```bash
 uv sync                                         # root: ruff
-(cd packages/overture_matchers && uv sync)      # package: pytest, pyspark
+(cd packages/overture_matchers && uv sync)      # package: pytest, pyspark, sedona
 uvx pre-commit install                          # optional: runs ruff on commit
 ```
 
 If Java 17 is not your default JVM, point `JAVA_HOME` at it, for example `export JAVA_HOME=/opt/homebrew/opt/openjdk@17` on macOS with Homebrew.
+
+The first test run downloads the Sedona, GraphFrames and hadoop-aws jars from Maven into `~/.ivy2` (about 750 MB). Later runs reuse them.
 
 ## Tests and lint
 

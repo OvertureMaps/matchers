@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, ParamSpec, TypeVar
 
@@ -93,15 +93,31 @@ def run_stage(
     )
 
 
+def local_sedona_session(
+    packages: Sequence[str] = (), conf: dict[str, str] | None = None
+) -> SparkSession:
+    """Start a local Sedona session that also loads ``packages``.
+
+    Args:
+        packages: Extra Maven coordinates, such as a theme's GraphFrames jar.
+        conf: Extra Spark settings.
+    """
+    from overture_spark import SparkPlatform, getSparkSedonaSession
+
+    return getSparkSedonaSession(
+        spark_platform=SparkPlatform.LOCAL,
+        extra_packages=list(packages),
+        extra_spark_conf=conf,
+    )
+
+
 def run_local(
     run: Callable[[SparkSession, RunConfig], None],
     params_file: str,
     spark: SparkSession | None = None,
+    packages: Sequence[str] = (),
 ) -> None:
     """Run a theme's ``run`` from a JSON params file, on a local Sedona session."""
-    if spark is None:
-        from overture_spark import SparkPlatform, getSparkSedonaSession
-
-        spark = getSparkSedonaSession(spark_platform=SparkPlatform.LOCAL)
+    spark = spark or local_sedona_session(packages)
     params = json.loads(Path(params_file).read_text())
     run(spark, RunConfig.for_run(spark, params))

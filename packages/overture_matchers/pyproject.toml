@@ -17,7 +17,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
 ]
-# AWS Glue provides Spark at runtime, so PySpark stays a dev dependency.
+# AWS Glue provides Spark and Sedona at runtime, so both stay dev dependencies.
 dependencies = ["overture-spark>=0.4.1"]
 
 [project.urls]
@@ -27,7 +27,8 @@ Issues = "https://github.com/OvertureMaps/matchers/issues"
 
 [dependency-groups]
 dev = [
-    "pyspark==3.5.4",  # This is the Spark version in AWS Glue 5.0.
+    "apache-sedona==1.8.1",  # The design pins Sedona 1.8.1 for the Python jobs.
+    "pyspark[sql]==3.5.4",  # This is the Spark version in AWS Glue 5.0.
     "pytest>=8.0",
 ]
 
