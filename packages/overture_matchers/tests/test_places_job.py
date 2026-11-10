@@ -54,6 +54,12 @@ def test_job_writes_config_then_stops_at_first_stub(spark, tmp_path, params):
     assert not (tmp_path / "run" / "_completed_stages").exists()
 
 
+def test_run_rejects_inputs_without_a_place_entry(spark, tmp_path, params):
+    params["input"] = {"building": params["input"]["place"]}
+    with pytest.raises(ValueError, match="'place' entry"):
+        job.run(spark, job.RunConfig.from_params(params))
+
+
 def test_run_local_reads_params_file(spark, tmp_path, params):
     params_file = tmp_path / "params.json"
     params_file.write_text(json.dumps(params))

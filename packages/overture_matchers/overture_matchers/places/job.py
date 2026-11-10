@@ -44,7 +44,10 @@ def matching(
 
 
 def assign_ids(
-    raw: RawInputs, prepared: SetupOutput, matched: MatchingOutput
+    raw: RawInputs,
+    prepared: SetupOutput,
+    matched: MatchingOutput,
+    checkpoint: io.Checkpoint = no_checkpoint,
 ) -> AssignIdsOutput:
     """Pick cluster winners and assign GERS IDs."""
     raise NotImplementedError("places assign_ids is not ported yet")
@@ -62,22 +65,20 @@ def metrics(
 
 def run(spark: SparkSession, config: RunConfig) -> None:
     """Run the places stages, skipping completed ones."""
+    if TABLE not in config.input or TABLE not in config.baseline:
+        raise ValueError(f"input and baseline need a {TABLE!r} entry")
     # GraphFrames connected components needs a checkpoint directory.
     spark.sparkContext.setCheckpointDir(io.run_uri(config.output_path, "checkpoints"))
     raw = RawInputs(
         spark.read.parquet(*config.input[TABLE]),
         spark.read.parquet(*config.baseline[TABLE]),
     )
+    checkpoint = io.checkpointer(spark, config.output_path, TABLE)
     prepared = run_stage(spark, config, TABLE, setup, raw)
-    matched = run_stage(
-        spark,
-        config,
-        TABLE,
-        matching,
-        prepared,
-        checkpoint=io.checkpointer(spark, config.output_path, TABLE),
+    matched = run_stage(spark, config, TABLE, matching, prepared, checkpoint=checkpoint)
+    ids = run_stage(
+        spark, config, TABLE, assign_ids, raw, prepared, matched, checkpoint=checkpoint
     )
-    ids = run_stage(spark, config, TABLE, assign_ids, raw, prepared, matched)
     run_stage(spark, config, TABLE, metrics, raw, prepared, matched, ids)
 
 

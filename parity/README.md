@@ -17,7 +17,7 @@ uv run --with pytest --with duckdb pytest parity/
 
 ## Example commands
 
-Placeholders are in capitals. Start a Scala run, passing these arguments plus the job's usual input, baseline and model arguments; its run folder is `<outputPath>/<runId>`. A Python run has no `runId`; its `outputPath` is the run folder.
+Placeholders are in capitals. Start a Scala run, passing these arguments plus the job's usual input, baseline and model arguments; its run folder is `<outputPath>/<runId>`. A Python run has no `runId`; its `outputPath` is the run folder. Python params are one JSON object with bare names (`outputPath`, not `--outputPath`).
 
 ```bash
 aws glue start-job-run --job-name SCALA_JOB \
@@ -31,7 +31,15 @@ for f in candidates baseline embeddings; do
     aws s3 cp --recursive s3://BUCKET/parity/scala-1/$f s3://BUCKET/parity/py-1/$f
 done
 printf '' | aws s3 cp - s3://BUCKET/parity/py-1/_completed_stages/setup
-aws glue start-job-run --job-name PYTHON_JOB \
-    --arguments '{"--outputPath":"s3://BUCKET/parity/py-1","--outputDebug":"true"}'
+cat > params.json <<'EOF'
+{
+  "outputPath": "s3://BUCKET/parity/py-1",
+  "input": {"place": ["s3://BUCKET/CANDIDATES/"]},
+  "baseline": {"place": ["s3://BUCKET/BASELINE/"]},
+  "provider": "PROVIDER",
+  "outputDebug": "true"
+}
+EOF
+python -m overture_matchers.places.job params.json
 uv run parity/compare.py s3://BUCKET/parity/scala-1 s3://BUCKET/parity/py-1
 ```
