@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple, ParamSpec, TypeVar, get_type_hints
+from typing import TYPE_CHECKING, NamedTuple, ParamSpec, TypeVar
 
 from overture_matchers.core import io
 from overture_matchers.core.config import RunConfig
@@ -57,6 +57,13 @@ def no_checkpoint(df: DataFrame, name: str) -> DataFrame:
     return df
 
 
+def _output_type(stage_fn: Callable[..., T]) -> type[T]:
+    # Only the return annotation is resolved: get_type_hints would also resolve
+    # parameter types, which are often imported only for type checking.
+    hint = stage_fn.__annotations__["return"]
+    return eval(hint, stage_fn.__globals__) if isinstance(hint, str) else hint
+
+
 def run_stage(
     spark: SparkSession,
     config: RunConfig,
@@ -71,7 +78,7 @@ def run_stage(
     outputs. The marker is written only after every output.
     """
     stage = stage_fn.__name__
-    output_type = get_type_hints(stage_fn)["return"]
+    output_type = _output_type(stage_fn)
     if not io.stage_is_done(spark, config.output_path, stage):
         outputs = stage_fn(*args, **kwargs)
         for name, df in outputs._asdict().items():

@@ -10,7 +10,6 @@ from pyspark.sql import functions as F
 
 from overture_matchers.core.config import RunConfig
 from overture_matchers.core.stages import run_stage
-from overture_matchers.places import job
 
 
 class Out(NamedTuple):
@@ -67,6 +66,9 @@ def test_marker_is_written_only_after_all_outputs(spark, tmp_path):
     assert not (tmp_path / "_completed_stages").exists()
 
 
-def test_run_stage_resolves_stages_with_type_checking_only_annotations(spark, tmp_path):
-    with pytest.raises(NotImplementedError, match="matching"):
-        run_stage(spark, make_config(tmp_path), "place", job.matching, None)
+def test_run_stage_ignores_unresolvable_parameter_annotations(spark, tmp_path):
+    def stage(n: "OnlyForTypeCheckers") -> Out:  # noqa: F821
+        return Out(spark.range(n), spark.range(n))
+
+    out = run_stage(spark, make_config(tmp_path), "place", stage, 1)
+    assert out.first.count() == 1
