@@ -8,7 +8,9 @@
 [![Ruff](https://img.shields.io/badge/lint-ruff-0EC1BD?labelColor=001A39)](https://docs.astral.sh/ruff/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-05A5AF?labelColor=001A39)](../LICENSE)
 
-Python matchers for conflating Overture Maps data: places, divisions and addresses. A matcher compares incoming records against the Overture baseline and assigns each one a GERS ID: the matched baseline record's ID, or a new ID when nothing matches.
+Python matchers for conflating Overture Maps data.
+
+This repository implements matching for Overture's places, divisions, and addresses [themes](https://docs.overturemaps.org/theme-definitions-table.html). Matching is about ID assignment — incoming records from data providers are matched against a persistent baseline. If a record matches, it takes the baseline record's GERS ID. If nothing matches, it gets a new one.
 
 ```mermaid
 %%{init: {"theme": "dark", "flowchart": {"padding": 14}, "themeVariables": {"fontSize": "14px", "fontFamily": "Montserrat, Arial, sans-serif", "mainBkg": "#001A39", "nodeBorder": "#0EC1BD", "lineColor": "#4051CC", "primaryTextColor": "#FFFFFF", "edgeLabelBackground": "#001A39"}}}%%
