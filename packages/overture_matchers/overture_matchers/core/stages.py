@@ -67,17 +67,18 @@ def run_stage(
 ) -> T:
     """Run ``stage_fn`` unless its marker exists, and return reads of its outputs.
 
-    The stage marker gets its name from ``stage_fn.__name__``. The output folders
+    The stage marker gets its name from ``stage_fn.__name__`` and ``feature_type``,
+    so each feature type in a run has its own marker. The output folders
     get their names from the fields of ``stage_fn``'s return type. The marker is
     written only after every output.
     """
     stage = stage_fn.__name__
     output_type = _output_type(stage_fn)
-    if not io.stage_is_done(spark, config.output_path, stage):
+    if not io.stage_is_done(spark, config.output_path, stage, feature_type):
         outputs = stage_fn(*args, **kwargs)
         for name, df in outputs._asdict().items():
             io.write_output(config.output_path, name, feature_type, df)
-        io.mark_stage_done(spark, config.output_path, stage)
+        io.mark_stage_done(spark, config.output_path, stage, feature_type)
         spark.catalog.clearCache()
     return output_type(
         *(

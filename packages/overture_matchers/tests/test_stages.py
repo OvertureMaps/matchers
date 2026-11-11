@@ -27,11 +27,11 @@ def test_run_stage_writes_outputs_marker_and_returns_reads(spark, tmp_path):
 
     out = run_stage(spark, make_config(tmp_path), "place", stage, 2)
     assert (out.first.count(), out.second.count()) == (2, 3)
-    assert (tmp_path / "_completed_stages" / "stage").is_file()
+    assert (tmp_path / "_completed_stages" / "stage" / "type=place").is_file()
     assert (tmp_path / "first" / "type=place").is_dir()
 
 
-def test_run_stage_skips_when_marker_exists(spark, tmp_path):
+def test_run_stage_skips_when_marker_exists_for_that_feature_type(spark, tmp_path):
     calls = []
 
     def stage(n: int) -> Out:
@@ -43,6 +43,8 @@ def test_run_stage_skips_when_marker_exists(spark, tmp_path):
     out = run_stage(spark, config, "place", stage, 99)
     assert calls == [2]
     assert out.first.count() == 2
+    run_stage(spark, config, "division", stage, 3)
+    assert calls == [2, 3]
 
 
 def test_run_stage_reruns_without_marker_and_overwrites(spark, tmp_path):
@@ -51,7 +53,7 @@ def test_run_stage_reruns_without_marker_and_overwrites(spark, tmp_path):
 
     config = make_config(tmp_path)
     run_stage(spark, config, "place", stage, 5)
-    (tmp_path / "_completed_stages" / "stage").unlink()
+    (tmp_path / "_completed_stages" / "stage" / "type=place").unlink()
     out = run_stage(spark, config, "place", stage, 2)
     assert out.first.count() == 2
 

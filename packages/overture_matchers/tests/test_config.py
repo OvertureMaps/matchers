@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from overture_matchers.core import io
 from overture_matchers.core.config import RunConfig
 
 PARAMS = {
@@ -61,9 +62,11 @@ def test_for_run_writes_config_json_with_versions(spark, tmp_path):
     assert "overture-matchers" in record["versions"]
 
 
-def test_for_run_accepts_same_params_and_rejects_changed_ones(spark, tmp_path):
+def test_for_run_rejects_changed_params_only_once_a_stage_is_done(spark, tmp_path):
     params = PARAMS | {"outputPath": str(tmp_path)}
+    RunConfig.for_run(spark, params | {"outputDebug": False})
     RunConfig.for_run(spark, params)
+    io.mark_stage_done(spark, str(tmp_path), "setup", "place")
     RunConfig.for_run(spark, params)
     with pytest.raises(
         ValueError, match=r"differs in \['output_debug'\]; start a new run folder"

@@ -35,7 +35,7 @@ At a high level, I'd like to remove the class structure entirely:
   * e.g. setup -> matching -> assign_ids -> metrics
   * Each stage writes to its own subdirectory within the run's `MatchBundle` (a new kind of `Bundle`, we were kinda already doing this, but now it's official) using Scala's flat folder layout. I did consider using separate bundles, but matching is typically run all-at-once, and the metadata.json gets needlessly messy if everything is in its own bundle. I think that, in general, 1 DAG run ~ 1 Bundle (lmk if you disagree)
   * The job writes directly to the bundle's output path (`runId` is not an argument).
-  * To track stage success, the bundle has a `_completed_stages` subdirectory that contains success files at `_completed_stages/<stage>` that are written when `<stage>` has finished running. This is how reruns can pick up again partway through the job.
+  * To track stage success, the bundle has a `_completed_stages` subdirectory that contains success files at `_completed_stages/<stage>/type=<feature_type>` that are written when `<stage>` has finished running for that feature type. This is how reruns can pick up again partway through the job.
 * Stages are pure functions, too, mapping a `NamedTuple` of dataframes to another `NamedTuple` of dataframes. The orchestration layer sits above this and cand decide whether the functions are just chained together (for local tests) or written to / read from S3 between stages (for runs at scale).
 * Stages are composed of *steps*:
   * Each step is a `DataFrame`->`DataFrame` transformation.
@@ -197,7 +197,7 @@ if __name__ == "__main__":
 `run_stage` is shared by all themes in `core/`; it does a few things:
 * It skips any stage that has a marker present
 * It calls the stage function with all the necessary arguments
-* It writes the stage output to S3 as zstd-compressed parquet, as Scala does, at `<postfix>/type=<feature_type>/`, along with a success marker in `_completed_stages/<stage>`
+* It writes the stage output to S3 as zstd-compressed parquet, as Scala does, at `<postfix>/type=<feature_type>/`, along with a success marker in `_completed_stages/<stage>/type=<feature_type>`
 * It "reads" back the written outputs and returns the `DataFrame`s. Parquet reads are lazily eval'd by Spark, so this shouldn't incur any costs on the final stage.
 
 It also uses `ParamSpec` / `TypeVar` from Python 3.10+ for better type hinting.
@@ -217,13 +217,13 @@ def run_stage(
 ) -> T:
     stage = stage_fn.__name__
     output_type = get_type_hints(stage_fn)["return"]
-    if not io.stage_is_done(spark, config.output_path, stage):
+    if not io.stage_is_done(spark, config.output_path, stage, feature_type):
         outputs = stage_fn(*args, **kwargs)
         for name, df in outputs._asdict().items():
             io.write_output(config.output_path, name, feature_type, df)
         io.mark_stage_done(
-            spark, config.output_path, stage
-        )  # writes _completed_stages/<stage>
+            spark, config.output_path, stage, feature_type
+        )  # writes _completed_stages/<stage>/type=<feature_type>
         spark.catalog.clearCache()  # everything is on S3 between stages
     return output_type(
         *(
@@ -256,8 +256,10 @@ def checkpoint(df, output_path, name, feature_type):
     return read_output(df.sparkSession, output_path, name, feature_type)
 
 
-def stage_is_done(spark, output_path, stage_name):
-    return exists(spark, f"{output_path}/_completed_stages/{stage_name}")
+def stage_is_done(spark, output_path, stage_name, feature_type):
+    return exists(
+        spark, f"{output_path}/_completed_stages/{stage_name}/type={feature_type}"
+    )
 ```
 
 And `RunConfig` is pretty flat; it looks something like:
@@ -279,10 +281,12 @@ class RunConfig:
         config = cls.from_params(params)
         path = f"{config.output_path}/config.json"
         record = config.to_json()  # also records installed package versions
-        if io.exists(spark, path) and json.loads(io.read(spark, path)) != json.loads(
-            record
+        if (
+            io.any_stage_done(spark, config.output_path)
+            and io.exists(spark, path)
+            and json.loads(io.read(spark, path)) != json.loads(record)
         ):
-            raise ValueError(f"{path} was written with different params")
+            raise ValueError(f"{path} differs; start a new run folder")
         io.write(path, record)
         return config
 ```
@@ -429,17 +433,17 @@ Implementation details behind the design above.
 ### Target structure
 
 - Steps and stages do no I/O, so Spark evaluates them lazily and nothing executes until `run_stage` writes the outputs.
-- The Python job's `outputPath` is the `MatchBundle` base URI, the counterpart of Scala's `<outputPath>/<runId>`. Inside it, outputs sit at Scala's paths (`candidates/`, `matches/`, `final/`, ...), next to `config.json` and the stage markers in `_completed_stages/` (`_completed_stages/setup`, `_completed_stages/matching`, ...).
+- The Python job's `outputPath` is the `MatchBundle` base URI, the counterpart of Scala's `<outputPath>/<runId>`. Inside it, outputs sit at Scala's paths (`candidates/`, `matches/`, `final/`, ...), next to `config.json` and the stage markers in `_completed_stages/` (`_completed_stages/setup/type=place`, `_completed_stages/matching/type=place`, ...). A marker names its feature type because a divisions run matches `division` and `division_area` in one folder, one `run_stage` call per type..
 - The DAG is the only writer of `metadata.json`, because `Metadata` keys its sections by the Airflow `dag_id` and rewrites the whole file on every update. Downstream DAGs list the match bundle as an input, which carries its metadata forward.
 - The code never checks which theme it's running. The DAG picks the theme by choosing which job to launch, and that theme's `run()` fixes the stage order.
 - Places has three matching modes (see OvertureMaps/overture-matchers#431): places conflation, baseline conflation and linkage. Each mode gets its own match function. They share the same building blocks and differ only in which kinds of pairs they compare and how they pick the final match.
 - Follow Overture conventions in the code: MIT header and a one-paragraph purpose on every file, real docstrings on public functions, DCO sign-off (`git commit -s`), `python:X.Y-slim` images with uv from a pinned `ghcr.io/astral-sh/uv` stage.
 - `RunConfig` exists only in the Python process that drives the job (the Spark driver). Executors get plain values from it, never the object.
 - `RunConfig` holds the job params, with defaults filled in and values parsed into real types. Theme constants and the model stay out of it.
-- The job starts with `RunConfig.for_run(params)`, which builds `RunConfig` from the params and writes `config.json` before reading any input. If the run folder already has a `config.json` that differs, the job fails. Otherwise a rerun with changed params would skip stages that ran with the old ones. Apart from that check, nothing reads `config.json` back: a retry gets the same params from Airflow and builds the same config. Anything resolved at run time (a "latest" baseline, a timestamp) is resolved in the DAG and passed in as a param, so the job never resolves anything on its own.
+- The job starts with `RunConfig.for_run(params)`, which builds `RunConfig` from the params and writes `config.json` before reading any input. If a stage has finished and the run folder's `config.json` differs, the job fails. Otherwise a rerun with changed params would skip stages that ran with the old ones. Before any stage finishes, the new `config.json` replaces the old one, so a retry that fixes a bad param (a missing `modelJar`, a wrong input path) reuses the folder. Apart from that check, nothing reads `config.json` back: a retry gets the same params from Airflow and builds the same config. Anything resolved at run time (a "latest" baseline, a timestamp) is resolved in the DAG and passed in as a param, so the job never resolves anything on its own.
 - Every stage write uses `mode("overwrite")`, so rerunning a stage without a marker replaces whatever a failed attempt left behind.
 - `run_stage` writes a stage's marker after all of the stage's outputs are written, and clears Spark's cache before the next stage. Spark's own `_SUCCESS` files mark single DataFrame writes, so they never stand in for a stage marker.
-- `config.json` lists every field, defaults included, plus the installed matcher package version, so the bundle metadata shows exactly what the run used. A changed matcher version or model jar between attempts fails the same check as changed params. This is on purpose: after a version change, start a new run folder. Uncommitted local edits keep the same version string, so a local rerun with edited code still resumes. Example (values are placeholders):
+- `config.json` lists every field, defaults included, plus the installed matcher package version, so the bundle metadata shows exactly what the run used. Once a stage has finished, a changed matcher version or model jar between attempts fails the same check as changed params. This is on purpose: after a version change, start a new run folder. Uncommitted local edits keep the same version string, so a local rerun with edited code still resumes. Example (values are placeholders):
 
   ```json
   {

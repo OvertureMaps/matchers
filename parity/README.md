@@ -39,7 +39,7 @@ One stage at a time: copy a Scala run's earlier stage outputs into a new run fol
 for f in candidates baseline embeddings; do
     aws s3 cp --recursive s3://BUCKET/parity/scala-1/$f s3://BUCKET/parity/py-1/$f
 done
-aws s3 cp - s3://BUCKET/parity/py-1/_completed_stages/setup < /dev/null
+aws s3 cp - s3://BUCKET/parity/py-1/_completed_stages/setup/type=place < /dev/null
 aws glue start-job-run --job-name PYTHON_JOB \
     --arguments '{"--params":"{\"outputPath\":\"s3://BUCKET/parity/py-1\",\"outputDebug\":\"true\"}"}'
 uv run parity/compare.py s3://BUCKET/parity/scala-1 s3://BUCKET/parity/py-1

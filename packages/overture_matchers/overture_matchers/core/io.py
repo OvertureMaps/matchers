@@ -39,18 +39,27 @@ def read_output(
     return spark.read.parquet(output_uri(output_path, name, feature_type))
 
 
-def _marker_uri(output_path: str, stage: str) -> str:
-    return run_uri(output_path, MARKER_DIR, stage)
+def _marker_uri(output_path: str, stage: str, feature_type: str) -> str:
+    return run_uri(output_path, MARKER_DIR, stage, f"type={feature_type}")
 
 
-def stage_is_done(spark: SparkSession, output_path: str, stage: str) -> bool:
-    """Whether ``stage`` has a marker."""
-    return bool(list_files(spark, _marker_uri(output_path, stage)))
+def stage_is_done(
+    spark: SparkSession, output_path: str, stage: str, feature_type: str
+) -> bool:
+    """Whether ``stage`` has a marker for ``feature_type``."""
+    return bool(list_files(spark, _marker_uri(output_path, stage, feature_type)))
 
 
-def mark_stage_done(spark: SparkSession, output_path: str, stage: str) -> None:
-    """Write the marker that makes reruns skip ``stage``."""
-    write_text(spark, _marker_uri(output_path, stage), "")
+def any_stage_done(spark: SparkSession, output_path: str) -> bool:
+    """Whether the run folder has any stage marker."""
+    return bool(list_files(spark, run_uri(output_path, MARKER_DIR)))
+
+
+def mark_stage_done(
+    spark: SparkSession, output_path: str, stage: str, feature_type: str
+) -> None:
+    """Write the marker that makes reruns skip ``stage`` for ``feature_type``."""
+    write_text(spark, _marker_uri(output_path, stage, feature_type), "")
 
 
 def checkpoint(

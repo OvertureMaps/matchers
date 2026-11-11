@@ -115,14 +115,15 @@ class RunConfig:
         """Build the config and write ``config.json`` to the run folder.
 
         Raises:
-            ValueError: The folder holds a different ``config.json``. Without
-                this check, a rerun with changed params would skip stages that
-                ran with the old ones.
+            ValueError: A stage has finished and the folder holds a different
+                ``config.json``. A rerun with changed params would skip stages
+                that ran with the old ones. Before any stage finishes, a new
+                ``config.json`` replaces the old one, so a fixed retry works.
         """
         config = cls.from_params(params)
         path = io.run_uri(config.output_path, "config.json")
         record = config.to_json()
-        if list_files(spark, path):
+        if io.any_stage_done(spark, config.output_path) and list_files(spark, path):
             old, new = read_json(spark, path), json.loads(record)
             changed = sorted(
                 k for k in old.keys() | new.keys() if old.get(k) != new.get(k)

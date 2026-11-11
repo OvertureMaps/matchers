@@ -36,8 +36,8 @@ dev = [
 requires = ["setuptools>=77.0.3", "setuptools_scm>=8.0"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = ["overture_matchers", "overture_matchers.core", "overture_matchers.places"]
+[tool.setuptools.packages.find]
+include = ["overture_matchers*"]
 
 [tool.setuptools_scm]
 # The root setting points setuptools_scm at the monorepo git repo. The

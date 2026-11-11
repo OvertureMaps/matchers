@@ -22,10 +22,12 @@ def test_write_output_overwrites(spark, tmp_path):
 
 def test_stage_marker_roundtrip(spark, tmp_path):
     out = str(tmp_path)
-    assert not io.stage_is_done(spark, out, "setup")
-    io.mark_stage_done(spark, out, "setup")
-    assert io.stage_is_done(spark, out, "setup")
-    assert (tmp_path / "_completed_stages" / "setup").is_file()
+    assert not io.any_stage_done(spark, out)
+    io.mark_stage_done(spark, out, "setup", "place")
+    assert io.stage_is_done(spark, out, "setup", "place")
+    assert not io.stage_is_done(spark, out, "setup", "division")
+    assert io.any_stage_done(spark, out)
+    assert (tmp_path / "_completed_stages" / "setup" / "type=place").is_file()
 
 
 def test_checkpoint_writes_and_cuts_lineage(spark, tmp_path):
