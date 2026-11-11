@@ -44,21 +44,3 @@ Merging to `main` releases any package whose changes warrant a version bump. The
 ## Contributing
 
 See [CONTRIBUTING.md](../.github/CONTRIBUTING.md) for development setup, tests and lint.
-
-## Maintainers
-
-This repository uses `MAINTAINERS.md` files to track ownership for [LFX Insights](https://insights.linuxfoundation.org/docs/introduction/maintainers/) ingestion. LFX scans the full repository tree, so these files can live anywhere.
-
-To add a `MAINTAINERS.md` for a module or package, create it in the relevant directory using this format:
-
-```markdown
-# MAINTAINERS
-
-| Name     | GitHub Username | Role            | Affiliation |
-| -------- | --------------- | --------------- | ----------- |
-| Jane Doe | @janedoe        | Lead Maintainer | Org         |
-```
-
-## License
-
-[MIT](../LICENSE)

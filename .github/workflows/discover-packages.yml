@@ -43,8 +43,8 @@ jobs:
           json: true
           escape_json: false
 
-      # A change to these workflows retests every package. Root ruff.toml is
-      # left out because lint.yml already covers it.
+      # A change to these workflows retests every package. The root
+      # pyproject.toml's ruff config is left out because lint.yml already covers it.
       - name: Find changed package CI workflows
         id: ci-changed
         if: github.event_name != 'workflow_dispatch'
