@@ -1,6 +1,6 @@
 # Package versioning and publishing
 
-Each package under [`packages/`](packages) is versioned and released independently and automatically, following [OvertureMaps/overture-core](https://github.com/OvertureMaps/overture-core/blob/main/PACKAGE_VERSIONING.md).
+Each package under [`packages/`](../packages) is versioned and released independently and automatically, following [OvertureMaps/overture-core](https://github.com/OvertureMaps/overture-core/blob/main/PACKAGE_VERSIONING.md).
 
 ## Version
 
@@ -20,7 +20,7 @@ PRs are squash-merged, so the PR title is the commit PSR reads. PSR attributes a
 
 ## Release
 
-On push to `main`, [`publish_packages.yml`](.github/workflows/publish_packages.yml) runs three jobs for each package the push touched:
+On push to `main`, [`publish_packages.yml`](../.github/workflows/publish_packages.yml) runs three jobs for each package the push touched:
 
 1. `release` runs PSR. If a bump is warranted, PSR tags `<package_dir>-v<version>` and publishes a GitHub Release with the notes; nothing is committed back to `main`. The tag is pushed with an overture-pull-requester App token, since `GITHUB_TOKEN` can't push tags that change workflows. The App key and the AWS credentials that fetch it are cleared before PSR runs, and no other job sees them.
 2. `build`, with no secrets, builds only if this run's `release` job released the package: `uv build`, then `twine check --strict`, then upload `dist/` as an artifact.

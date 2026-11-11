@@ -17,7 +17,7 @@
 #
 # If publishing fails after the tag is pushed, that version stays unpublished; the next release supersedes it.
 #
-# See PACKAGE_VERSIONING.md for the release flow and the trusted-publisher
+# See docs/PACKAGE_VERSIONING.md for the release flow and the trusted-publisher
 # setup a new package needs.
 
 name: Publish Python Packages
