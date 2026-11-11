@@ -53,6 +53,8 @@ def _parse_table_map(value: Any) -> dict[str, list[str]]:
     """Accept ``{table: path | [paths]}`` as a dict or a JSON string."""
     if isinstance(value, str):
         value = json.loads(value)
+    if not isinstance(value, dict):
+        raise TypeError(f"expected a {{table: paths}} map, got {value!r}")
     return {
         table: [paths] if isinstance(paths, str) else list(paths)
         for table, paths in value.items()
@@ -120,7 +122,12 @@ class RunConfig:
         config = cls.from_params(params)
         path = io.run_uri(config.output_path, "config.json")
         record = config.to_json()
-        if list_files(spark, path) and read_json(spark, path) != json.loads(record):
-            raise ValueError(f"{path} was written with different params")
+        if list_files(spark, path):
+            old, new = read_json(spark, path), json.loads(record)
+            changed = sorted(
+                k for k in old.keys() | new.keys() if old.get(k) != new.get(k)
+            )
+            if changed:
+                raise ValueError(f"{path} differs in {changed}; start a new run folder")
         write_text(spark, path, record)
         return config

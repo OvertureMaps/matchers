@@ -42,11 +42,13 @@ def test_from_params_treats_empty_and_none_strings_as_unset():
     assert config.output_debug is True
 
 
-def test_from_params_rejects_missing_required_and_bad_bool():
+def test_from_params_rejects_missing_required_bad_bool_and_bad_map():
     with pytest.raises(ValueError, match="provider"):
         RunConfig.from_params({k: v for k, v in PARAMS.items() if k != "provider"})
     with pytest.raises(ValueError, match="true or false"):
         RunConfig.from_params(PARAMS | {"outputDebug": "maybe"})
+    with pytest.raises(TypeError, match="table: paths"):
+        RunConfig.from_params(PARAMS | {"input": '["s3://bucket/a/"]'})
 
 
 def test_for_run_writes_config_json_with_versions(spark, tmp_path):
@@ -61,5 +63,7 @@ def test_for_run_accepts_same_params_and_rejects_changed_ones(spark, tmp_path):
     params = PARAMS | {"outputPath": str(tmp_path)}
     RunConfig.for_run(spark, params)
     RunConfig.for_run(spark, params)
-    with pytest.raises(ValueError, match="different params"):
+    with pytest.raises(
+        ValueError, match=r"differs in \['output_debug'\]; start a new run folder"
+    ):
         RunConfig.for_run(spark, params | {"outputDebug": False})
