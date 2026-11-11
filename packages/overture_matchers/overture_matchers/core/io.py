@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 by the Overture Maps Foundation
-"""Run-folder I/O in Scala's layout: ``<output_path>/<name>/type=<table>/``."""
+"""Run-folder I/O in Scala's layout: ``<output_path>/<name>/type=<feature_type>/``."""
 
 from __future__ import annotations
 
@@ -20,23 +20,23 @@ def run_uri(output_path: str, *parts: str) -> str:
     return "/".join([output_path.rstrip("/"), *parts])
 
 
-def output_uri(output_path: str, name: str, table: str) -> str:
+def output_uri(output_path: str, name: str, feature_type: str) -> str:
     """URI of an output folder."""
-    return run_uri(output_path, name, f"type={table}")
+    return run_uri(output_path, name, f"type={feature_type}")
 
 
-def write_output(output_path: str, name: str, table: str, df: DataFrame) -> None:
+def write_output(output_path: str, name: str, feature_type: str, df: DataFrame) -> None:
     """Write ``df`` as zstd parquet, with overwrite."""
     df.write.mode("overwrite").option("compression", "zstd").parquet(
-        output_uri(output_path, name, table)
+        output_uri(output_path, name, feature_type)
     )
 
 
 def read_output(
-    spark: SparkSession, output_path: str, name: str, table: str
+    spark: SparkSession, output_path: str, name: str, feature_type: str
 ) -> DataFrame:
     """Read an output folder."""
-    return spark.read.parquet(output_uri(output_path, name, table))
+    return spark.read.parquet(output_uri(output_path, name, feature_type))
 
 
 def _marker_uri(output_path: str, stage: str) -> str:
@@ -54,7 +54,7 @@ def mark_stage_done(spark: SparkSession, output_path: str, stage: str) -> None:
 
 
 def checkpoint(
-    df: DataFrame, output_path: str | None, name: str, table: str
+    df: DataFrame, output_path: str | None, name: str, feature_type: str
 ) -> DataFrame:
     """Write ``df`` and return a read of it, which has no lineage back to ``df``.
 
@@ -62,5 +62,5 @@ def checkpoint(
     """
     if output_path is None:
         return df
-    write_output(output_path, name, table, df)
-    return read_output(df.sparkSession, output_path, name, table)
+    write_output(output_path, name, feature_type, df)
+    return read_output(df.sparkSession, output_path, name, feature_type)

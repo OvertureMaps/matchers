@@ -27,7 +27,7 @@ from overture_matchers.core.stages import (
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
 
-TABLE = "place"
+FEATURE_TYPE = "place"
 # Scala's GraphFrames build. Its jar also carries the Python API.
 PACKAGES = ("graphframes:graphframes:0.8.3-spark3.4-s_2.12",)
 
@@ -64,33 +64,33 @@ def metrics(
 
 def run(spark: SparkSession, config: RunConfig) -> None:
     """Run the places stages, skipping completed ones."""
-    if TABLE not in config.input or TABLE not in config.baseline:
-        raise ValueError(f"input and baseline need a {TABLE!r} entry")
+    if FEATURE_TYPE not in config.input or FEATURE_TYPE not in config.baseline:
+        raise ValueError(f"input and baseline need a {FEATURE_TYPE!r} entry")
     if config.model_jar is None:
         raise ValueError("places needs the modelJar param")
     # GraphFrames connected components needs a checkpoint directory.
     spark.sparkContext.setCheckpointDir(io.run_uri(config.output_path, "checkpoints"))
     raw = RawInputs(
-        spark.read.parquet(*config.input[TABLE]),
-        spark.read.parquet(*config.baseline[TABLE]),
+        spark.read.parquet(*config.input[FEATURE_TYPE]),
+        spark.read.parquet(*config.baseline[FEATURE_TYPE]),
     )
     prepared = run_stage(
-        spark, config, TABLE, setup, raw, match_history=config.match_history
+        spark, config, FEATURE_TYPE, setup, raw, match_history=config.match_history
     )
     matched = run_stage(
-        spark, config, TABLE, matching, prepared, output_path=config.output_path
+        spark, config, FEATURE_TYPE, matching, prepared, output_path=config.output_path
     )
     ids = run_stage(
         spark,
         config,
-        TABLE,
+        FEATURE_TYPE,
         assign_ids,
         raw,
         prepared,
         matched,
         output_path=config.output_path,
     )
-    run_stage(spark, config, TABLE, metrics, raw, prepared, matched, ids)
+    run_stage(spark, config, FEATURE_TYPE, metrics, raw, prepared, matched, ids)
 
 
 class PlacesMatchingJob(SparkSedonaJob):

@@ -60,7 +60,7 @@ def _output_type(stage_fn: Callable[..., T]) -> type[T]:
 def run_stage(
     spark: SparkSession,
     config: RunConfig,
-    table: str,
+    feature_type: str,
     stage_fn: Callable[P, T],
     *args: P.args,
     **kwargs: P.kwargs,
@@ -76,12 +76,12 @@ def run_stage(
     if not io.stage_is_done(spark, config.output_path, stage):
         outputs = stage_fn(*args, **kwargs)
         for name, df in outputs._asdict().items():
-            io.write_output(config.output_path, name, table, df)
+            io.write_output(config.output_path, name, feature_type, df)
         io.mark_stage_done(spark, config.output_path, stage)
         spark.catalog.clearCache()
     return output_type(
         *(
-            io.read_output(spark, config.output_path, name, table)
+            io.read_output(spark, config.output_path, name, feature_type)
             for name in output_type._fields
         )
     )

@@ -33,7 +33,7 @@ _PARAM_FIELDS = {
 }
 _REQUIRED = ("output_path", "input", "baseline", "provider")
 _BOOLS = ("match_history", "output_debug")
-_TABLE_MAPS = ("input", "baseline")
+_PATH_MAPS = ("input", "baseline")
 
 
 def _parse_bool(value: Any) -> bool:
@@ -45,20 +45,20 @@ def _parse_bool(value: Any) -> bool:
     raise ValueError(f"expected true or false, got {value!r}")
 
 
-def _parse_table_map(value: Any) -> dict[str, list[str]]:
-    """Accept ``{table: path | [paths]}`` as a dict or a JSON string."""
+def _parse_path_map(value: Any) -> dict[str, list[str]]:
+    """Accept ``{feature_type: path | [paths]}`` as a dict or a JSON string."""
     if isinstance(value, str):
         value = json.loads(value)
-    error = TypeError(f"expected a {{table: path | [paths]}} map, got {value!r}")
+    error = TypeError(f"expected a {{feature_type: path | [paths]}} map, got {value!r}")
     if not isinstance(value, dict):
         raise error
-    tables = {}
-    for table, paths in value.items():
+    path_map = {}
+    for feature_type, paths in value.items():
         paths = [paths] if isinstance(paths, str) else paths
         if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
             raise error
-        tables[table] = paths
-    return tables
+        path_map[feature_type] = paths
+    return path_map
 
 
 @dataclass(frozen=True)
@@ -99,8 +99,8 @@ class RunConfig:
         for field in _BOOLS:
             if field in values:
                 values[field] = _parse_bool(values[field])
-        for field in _TABLE_MAPS:
-            values[field] = _parse_table_map(values[field])
+        for field in _PATH_MAPS:
+            values[field] = _parse_path_map(values[field])
         return cls(**values)
 
     def to_json(self) -> str:

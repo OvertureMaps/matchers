@@ -55,7 +55,7 @@ The DAG has a task group that looks something like:
 bundle = MatchBundle(theme="places", provider=..., run=run_id)
 
 with TaskGroup("places_matching"):
-    # Candidate and baseline {table: [paths]} maps, known only at run time (XCom)
+    # Candidate and baseline {feature_type: [paths]} maps, known only at run time (XCom)
     inputs = resolve_inputs()
     init = initialize_bundle(bundle, inputs)
 
@@ -140,22 +140,22 @@ def metrics(
 Then, after each stage is defined (for a specific theme), that theme's `run()` wires them together. It starts by prepping all the pipeline inputs (input data, model, embeddings, previous metrics), and then chains together a bunch of `run_stage` calls:
 
 ```python
-TABLE = "place"  # Scala's output tables are partitioned by type=<table>
+FEATURE_TYPE = "place"  # Scala's outputs are partitioned by type=<feature_type>
 
 
 def run(spark, config):
     raw = RawInputs(
-        read_tables(spark, config.input), read_tables(spark, config.baseline)
+        read_inputs(spark, config.input), read_inputs(spark, config.baseline)
     )
     model = PlacesModel.load()
 
     prepared = run_stage(
-        spark, config, TABLE, setup, raw, match_history=config.match_history
+        spark, config, FEATURE_TYPE, setup, raw, match_history=config.match_history
     )
     matched = run_stage(
         spark,
         config,
-        TABLE,
+        FEATURE_TYPE,
         matching,
         prepared,
         model,
@@ -165,7 +165,7 @@ def run(spark, config):
     ids = run_stage(
         spark,
         config,
-        TABLE,
+        FEATURE_TYPE,
         assign_ids,
         raw,
         prepared,
@@ -175,7 +175,7 @@ def run(spark, config):
     run_stage(
         spark,
         config,
-        TABLE,
+        FEATURE_TYPE,
         metrics,
         raw,
         prepared,
@@ -197,7 +197,7 @@ if __name__ == "__main__":
 `run_stage` is shared by all themes in `core/`; it does a few things:
 * It skips any stage that has a marker present
 * It calls the stage function with all the necessary arguments
-* It writes the stage output to S3 as zstd-compressed parquet, as Scala does, at `<postfix>/type=<table>/`, along with a success marker in `_completed_stages/<stage>`
+* It writes the stage output to S3 as zstd-compressed parquet, as Scala does, at `<postfix>/type=<feature_type>/`, along with a success marker in `_completed_stages/<stage>`
 * It "reads" back the written outputs and returns the `DataFrame`s. Parquet reads are lazily eval'd by Spark, so this shouldn't incur any costs on the final stage.
 
 It also uses `ParamSpec` / `TypeVar` from Python 3.10+ for better type hinting.
@@ -210,7 +210,7 @@ T = TypeVar("T")
 def run_stage(
     spark,
     config,
-    table: str,
+    feature_type: str,
     stage_fn: Callable[P, T],
     *args: P.args,
     **kwargs: P.kwargs,
@@ -220,14 +220,14 @@ def run_stage(
     if not io.stage_is_done(spark, config.output_path, stage):
         outputs = stage_fn(*args, **kwargs)
         for name, df in outputs._asdict().items():
-            io.write_output(config.output_path, name, table, df)
+            io.write_output(config.output_path, name, feature_type, df)
         io.mark_stage_done(
             spark, config.output_path, stage
         )  # writes _completed_stages/<stage>
         spark.catalog.clearCache()  # everything is on S3 between stages
     return output_type(
         *(
-            io.read_output(spark, config.output_path, name, table)
+            io.read_output(spark, config.output_path, name, feature_type)
             for name in output_type._fields
         )
     )
@@ -249,11 +249,11 @@ To explore, you can call a stage function directly, e.g. `matching(SetupOutput(m
 Where the little `io` helper has functions like:
 
 ```python
-def checkpoint(df, output_path, name, table):
+def checkpoint(df, output_path, name, feature_type):
     if output_path is None:
         return df
-    write_output(output_path, name, table, df)
-    return read_output(df.sparkSession, output_path, name, table)
+    write_output(output_path, name, feature_type, df)
+    return read_output(df.sparkSession, output_path, name, feature_type)
 
 
 def stage_is_done(spark, output_path, stage_name):
@@ -266,7 +266,7 @@ And `RunConfig` is pretty flat; it looks something like:
 @dataclass(frozen=True)
 class RunConfig:
     provider: str
-    input: dict[str, list[str]]  # table -> paths
+    input: dict[str, list[str]]  # feature_type -> paths
     baseline: dict[str, list[str]]
     output_path: str  # bundle base
     model_jar: str  # versioned path of the places-matcher-model jar
@@ -309,7 +309,7 @@ At some point we should also figure out how this interacts with the model traini
 
 * **Non-Places Themes** - Themes don't share a fixed sequence of transformations: Addresses keeps only the 50 best pairs per candidate and scores each pair two ways, keeping the higher score. Divisions applies per-subtype thresholds and greedy selection, etc. For this reason, I think a functional approach to matching makes more sense; there's not much motivation to standardize the way matchers work across themes. Anyway, that's pretty much what I suggest here.
 
-* **Config refactoring** - Scala's theme config JSON mostly wires classes by name, which plain functions make unnecessary. The remaining settings fall into two categories, roughly: run settings (`outputDebug`, `matchHistory`), which become fields in `RunConfig`, and theme constants (table name, ID generator) -- which are just constants in the theme package. With no config JSON left, there is nothing for `overrideConfigPath` to override, so the job has no such param. The `{table: [paths]}` maps for `input` and `baseline` also become per-theme params during the cutover (for places, just candidate and baseline paths).
+* **Config refactoring** - Scala's theme config JSON mostly wires classes by name, which plain functions make unnecessary. The remaining settings fall into two categories, roughly: run settings (`outputDebug`, `matchHistory`), which become fields in `RunConfig`, and theme constants (feature type, ID generator) -- which are just constants in the theme package. With no config JSON left, there is nothing for `overrideConfigPath` to override, so the job has no such param. The `{feature_type: [paths]}` maps for `input` and `baseline` also become per-theme params during the cutover (for places, just candidate and baseline paths).
 
 * **Mixed Mode** - During the port, we may want to run the Scala pipeline up to a specific point, then let Python take over, or vice versa. To do this, I think we can just copy the Scala run's outputs into a new run folder, write some stage markers, and let the Python job skip any already-completed stages (see Parity). This should never need to happen in a prod environment, so I think I can hack around it during development.
 
@@ -377,7 +377,7 @@ Method, set up before any porting:
 
 The harness lives in a top-level `parity/` directory, outside `packages/`, and is deleted once Scala is archived.
 
-Until cutover, places keeps Scala's four stages and job params keep Scala's argument names. Outputs keep Scala's layout, `<postfix>/type=<table>/`, with Scala's `<postfix>` names and columns, so a Scala run folder and a Python run folder look the same. Python adds only `config.json` and the `_completed_stages/` markers. The layout is a contract with its readers. Changing it means a parallel change: write both layouts, move the readers, then drop the old one.
+Until cutover, places keeps Scala's four stages and job params keep Scala's argument names. Outputs keep Scala's layout, `<postfix>/type=<feature_type>/`, with Scala's `<postfix>` names and columns, so a Scala run folder and a Python run folder look the same. Python adds only `config.json` and the `_completed_stages/` markers. The layout is a contract with its readers. Changing it means a parallel change: write both layouts, move the readers, then drop the old one.
 
 ## Sequencing
 
@@ -458,7 +458,7 @@ Implementation details behind the design above.
 
 ### Rules
 
-- Transformation functions are pure. S3 reads and writes happen only in each theme's `run()`, in `run_stage`, and in `io.checkpoint`. Stages that checkpoint take an `output_path`, and `io.checkpoint(df, output_path, name, table)` writes `df` to `<run>/<name>/` and returns a read of it. That cuts the lineage, so later transformations don't recompute earlier ones and the query plan stays small. Matching checkpoints after blocking, where about 42B spatial pairs shrink to about 170M. Checkpoint outputs stay with the run. Places matching always writes `blocking/`, `scores/` and `matches_validated/` through `io.checkpoint`, and `assign_ids` always writes `idMap/`, whatever `output_debug` says. Every Scala places config sets `outputDebug` to true, so production output stays the same, and a debug-off run gains those folders. Scala's debug-off path, a plain `df.checkpoint()` into `checkpoints/`, is not ported. This keeps Scala's four stages until cutover, where splitting matching into more stages would change the layout.
+- Transformation functions are pure. S3 reads and writes happen only in each theme's `run()`, in `run_stage`, and in `io.checkpoint`. Stages that checkpoint take an `output_path`, and `io.checkpoint(df, output_path, name, feature_type)` writes `df` to `<run>/<name>/` and returns a read of it. That cuts the lineage, so later transformations don't recompute earlier ones and the query plan stays small. Matching checkpoints after blocking, where about 42B spatial pairs shrink to about 170M. Checkpoint outputs stay with the run. Places matching always writes `blocking/`, `scores/` and `matches_validated/` through `io.checkpoint`, and `assign_ids` always writes `idMap/`, whatever `output_debug` says. Every Scala places config sets `outputDebug` to true, so production output stays the same, and a debug-off run gains those folders. Scala's debug-off path, a plain `df.checkpoint()` into `checkpoints/`, is not ported. This keeps Scala's four stages until cutover, where splitting matching into more stages would change the layout.
 - A DataFrame that two branches of one stage read gets an explicit `.cache()`. In `match_places`, candidates feed both the history pairs and the spatial union. `run_stage` writes each output separately, so upstream work shared by two outputs of one stage gets cached before the stage returns: in `assign_ids`, `final` and `fallout` both come from the cluster winner selection, which Scala caches too.
 - Each stage output's columns are defined by the `select` that produces it, as in Scala (the transformer's required-columns list, the `MatchResult` columns). There is no separate schema validation layer for now; schema tracking across Overture pipelines is an open, org-wide question.
 - Setup functions build one `select` from a list of column expressions. A `withColumn` chain adds one projection per column to the query plan.
@@ -522,7 +522,7 @@ Harness layout: `parity/` sits outside `packages/`, so nothing in it ships to Py
 - the DAG stops sending `runId`. Scala uses it to stamp `snapshot` (`<provider>-<theme>-<runId>`) on every metrics row. Python's metrics rows leave out `snapshot` and `stage`, and `MatcherTelemetryJob` fills both through `TelemetryEmitter`, which already builds the same snapshot from its own `run_id` param
 - the job's extra jars are GraphFrames (shaded into the Scala jar today), the `PlaceTextNormalizer` jar, and spark-nlp for divisions. jpostal and libphonenumber drop out: Sedona 1.8.1 ships jpostal, and phones use `phonenumbers`
 - libpostal model data: the Scala job receives it as a Glue extra file, which works only because a JVM job's params pass through as Glue arguments, and a Python job's params do not. Instead, the v1.0.0 model data sits unpacked under an S3 prefix, the job's Spark conf sets `spark.sedona.libpostal.dataDir` to it, and setup calls `sc.addFile(<prefix>, recursive=True)`, Sedona's documented mode for remote data. The `.so` files drop out
-- the DAG stops reading the job's `outputResultFile`. The final path is fixed by the layout (`<outputPath>/final/type=<table>/`), so the DAG builds the `{"<table>": "<path>"}` map itself. The jobs write no result file and ignore an `outputResultFile` param, so cloned Scala arguments still run
+- the DAG stops reading the job's `outputResultFile`. The final path is fixed by the layout (`<outputPath>/final/type=<feature_type>/`), so the DAG builds the `{"<feature_type>": "<path>"}` map itself. The jobs write no result file and ignore an `outputResultFile` param, so cloned Scala arguments still run
 
 ### Local Docker runtime
 

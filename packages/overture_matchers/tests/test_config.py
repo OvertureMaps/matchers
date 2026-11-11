@@ -47,9 +47,9 @@ def test_from_params_rejects_missing_required_bad_bool_and_bad_map():
         RunConfig.from_params({k: v for k, v in PARAMS.items() if k != "provider"})
     with pytest.raises(ValueError, match="true or false"):
         RunConfig.from_params(PARAMS | {"outputDebug": "maybe"})
-    with pytest.raises(TypeError, match="table: path"):
+    with pytest.raises(TypeError, match="feature_type: path"):
         RunConfig.from_params(PARAMS | {"input": '["s3://bucket/a/"]'})
-    with pytest.raises(TypeError, match="table: path"):
+    with pytest.raises(TypeError, match="feature_type: path"):
         RunConfig.from_params(PARAMS | {"input": {"place": {"path": "/tmp/in"}}})
 
 
