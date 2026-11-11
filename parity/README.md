@@ -7,7 +7,7 @@ Compares two matcher runs on the same input and prints where they differ, for pe
 - `ids`: the share of candidate records with the same outcome in both runs, overall and broken down by country and by match type. The outcome is the assigned ID, or falling out as a duplicate of another record. New IDs are random, so two new IDs count as the same when they cover the same records.
 - `groups`: pairs of records grouped together in each run, and the share of each run's pairs the other run also has.
 
-It is a [uv script](https://docs.astral.sh/uv/guides/scripts/) with inline dependencies. Run folders are in the layout defined by the Scala code, `<run folder>/<stage output>/type=<feature_type>/`, and runs need `outputDebug=true`. Both runs must use the same model version and the same embeddings cache snapshot.
+It is a [uv script](https://docs.astral.sh/uv/guides/scripts/) with inline dependencies. Run folders are in the layout defined by the Scala code, `<run folder>/<stage output>/type=<feature_type>/`, and the Scala run needs `outputDebug=true`. Both runs must use the same model version and the same embeddings cache snapshot.
 
 CI doesn't run the tests. Run them by hand from the repo root; they use local fixtures and no AWS:
 
@@ -28,7 +28,7 @@ A Python run takes the same params without the leading dashes, as one JSON objec
 
 ```bash
 aws glue start-job-run --job-name PYTHON_JOB \
-    --arguments '{"--params":"{\"outputPath\":\"s3://BUCKET/parity/py-1\",\"outputDebug\":\"true\"}"}'
+    --arguments '{"--params":"{\"outputPath\":\"s3://BUCKET/parity/py-1\"}"}'
 ```
 
 Most candidates in a production places run are history matched, and those skip blocking and scoring, so a comparison with history matching on mostly checks history matching. Compare a second pair of runs with `matchHistory` set to `false` in both jobs' params.
@@ -41,6 +41,6 @@ for f in candidates baseline embeddings; do
 done
 aws s3 cp - s3://BUCKET/parity/py-1/_completed_stages/setup/type=place < /dev/null
 aws glue start-job-run --job-name PYTHON_JOB \
-    --arguments '{"--params":"{\"outputPath\":\"s3://BUCKET/parity/py-1\",\"outputDebug\":\"true\"}"}'
+    --arguments '{"--params":"{\"outputPath\":\"s3://BUCKET/parity/py-1\"}"}'
 uv run parity/compare.py s3://BUCKET/parity/scala-1 s3://BUCKET/parity/py-1
 ```

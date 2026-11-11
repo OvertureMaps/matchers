@@ -74,3 +74,11 @@ def test_run_stage_ignores_unresolvable_parameter_annotations(spark, tmp_path):
 
     out = run_stage(spark, make_config(tmp_path), "place", stage, 1)
     assert out.first.count() == 1
+
+
+def test_run_stage_names_a_stage_without_a_return_annotation(spark, tmp_path):
+    def stage():
+        return Out(spark.range(1), spark.range(1))
+
+    with pytest.raises(TypeError, match="stage stage needs a NamedTuple"):
+        run_stage(spark, make_config(tmp_path), "place", stage)

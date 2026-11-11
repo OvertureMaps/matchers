@@ -96,7 +96,7 @@ def run(spark: SparkSession, config: RunConfig) -> None:
 class PlacesMatchingJob(SparkSedonaJob):
     """The four-stage place matching job."""
 
-    def execute_job(self):
+    def execute_job(self) -> None:
         """Run with the job params."""
         run(self.spark, RunConfig.for_run(self.spark, self.result.params))
 

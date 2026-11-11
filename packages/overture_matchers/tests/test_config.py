@@ -23,10 +23,10 @@ def test_from_params_fills_defaults_and_parses_types():
     )
     assert config.baseline == {"place": ["/tmp/base"]}
     assert config.match_history is True
-    assert config.output_debug is True
     assert config.embeddings_cache_table is None
     assert config.model_jar is None
     assert RunConfig.from_params(PARAMS | {"modelJar": "/m.jar"}).model_jar == "/m.jar"
+    assert RunConfig.from_params(PARAMS | {"outputPath": "/r/"}).output_path == "/r"
 
 
 def test_from_params_treats_empty_and_none_strings_as_unset():
@@ -35,19 +35,19 @@ def test_from_params_treats_empty_and_none_strings_as_unset():
         | {
             "previousMetricsPath": "",
             "embeddingsCacheTable": " None ",
-            "outputDebug": "none",
+            "matchHistory": "none",
         }
     )
     assert config.previous_metrics_path is None
     assert config.embeddings_cache_table is None
-    assert config.output_debug is True
+    assert config.match_history is True
 
 
 def test_from_params_rejects_missing_required_bad_bool_and_bad_map():
     with pytest.raises(ValueError, match="provider"):
         RunConfig.from_params({k: v for k, v in PARAMS.items() if k != "provider"})
     with pytest.raises(ValueError, match="true or false"):
-        RunConfig.from_params(PARAMS | {"outputDebug": "maybe"})
+        RunConfig.from_params(PARAMS | {"matchHistory": "maybe"})
     with pytest.raises(TypeError, match="feature_type: path"):
         RunConfig.from_params(PARAMS | {"input": '["s3://bucket/a/"]'})
     with pytest.raises(TypeError, match="feature_type: path"):
@@ -58,17 +58,17 @@ def test_for_run_writes_config_json_with_versions(spark, tmp_path):
     RunConfig.for_run(spark, PARAMS | {"outputPath": str(tmp_path)})
     record = json.loads((tmp_path / "config.json").read_text())
     assert record["provider"] == "acme"
-    assert record["output_debug"] is True
+    assert record["match_history"] is True
     assert "overture-matchers" in record["versions"]
 
 
 def test_for_run_rejects_changed_params_only_once_a_stage_is_done(spark, tmp_path):
     params = PARAMS | {"outputPath": str(tmp_path)}
-    RunConfig.for_run(spark, params | {"outputDebug": False})
+    RunConfig.for_run(spark, params | {"matchHistory": False})
     RunConfig.for_run(spark, params)
     io.mark_stage_done(spark, str(tmp_path), "setup", "place")
     RunConfig.for_run(spark, params)
     with pytest.raises(
-        ValueError, match=r"differs in \['output_debug'\]; start a new run folder"
+        ValueError, match=r"differs in \['match_history'\]; start a new run folder"
     ):
-        RunConfig.for_run(spark, params | {"outputDebug": False})
+        RunConfig.for_run(spark, params | {"matchHistory": False})

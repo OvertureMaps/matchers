@@ -272,8 +272,7 @@ class RunConfig:
     baseline: dict[str, list[str]]
     output_path: str  # bundle base
     model_jar: str  # versioned path of the places-matcher-model jar
-    match_history: bool = True  # Scala's theme configs set both to true
-    output_debug: bool = True
+    match_history: bool = True  # Scala's theme configs set this to true
     # ...
 
     @classmethod
@@ -313,7 +312,7 @@ At some point we should also figure out how this interacts with the model traini
 
 * **Non-Places Themes** - Themes don't share a fixed sequence of transformations: Addresses keeps only the 50 best pairs per candidate and scores each pair two ways, keeping the higher score. Divisions applies per-subtype thresholds and greedy selection, etc. For this reason, I think a functional approach to matching makes more sense; there's not much motivation to standardize the way matchers work across themes. Anyway, that's pretty much what I suggest here.
 
-* **Config refactoring** - Scala's theme config JSON mostly wires classes by name, which plain functions make unnecessary. The remaining settings fall into two categories, roughly: run settings (`outputDebug`, `matchHistory`), which become fields in `RunConfig`, and theme constants (feature type, ID generator) -- which are just constants in the theme package. With no config JSON left, there is nothing for `overrideConfigPath` to override, so the job has no such param. The `{feature_type: [paths]}` maps for `input` and `baseline` also become per-theme params during the cutover (for places, just candidate and baseline paths).
+* **Config refactoring** - Scala's theme config JSON mostly wires classes by name, which plain functions make unnecessary. The remaining settings fall into two categories, roughly: run settings (`matchHistory`), which become fields in `RunConfig`, and theme constants (feature type, ID generator) -- which are just constants in the theme package. With no config JSON left, there is nothing for `overrideConfigPath` to override, so the job has no such param. The `{feature_type: [paths]}` maps for `input` and `baseline` also become per-theme params during the cutover (for places, just candidate and baseline paths).
 
 * **Mixed Mode** - During the port, we may want to run the Scala pipeline up to a specific point, then let Python take over, or vice versa. To do this, I think we can just copy the Scala run's outputs into a new run folder, write some stage markers, and let the Python job skip any already-completed stages (see Parity). This should never need to happen in a prod environment, so I think I can hack around it during development.
 
@@ -453,7 +452,6 @@ Implementation details behind the design above.
     "provider": "<provider>",
     "model_jar": "<path>/places-matcher-model-<version>.jar",
     "match_history": true,
-    "output_debug": true,
     "embeddings_cache_table": null,
     "previous_metrics_path": "s3://.../<previous run>/metrics/",
     "versions": {"overture-matchers": "<version>"}
@@ -462,7 +460,7 @@ Implementation details behind the design above.
 
 ### Rules
 
-- Transformation functions are pure. S3 reads and writes happen only in each theme's `run()`, in `run_stage`, and in `io.checkpoint`. Stages that checkpoint take an `output_path`, and `io.checkpoint(df, output_path, name, feature_type)` writes `df` to `<run>/<name>/` and returns a read of it. That cuts the lineage, so later transformations don't recompute earlier ones and the query plan stays small. Matching checkpoints after blocking, where about 42B spatial pairs shrink to about 170M. Checkpoint outputs stay with the run. Places matching always writes `blocking/`, `scores/` and `matches_validated/` through `io.checkpoint`, and `assign_ids` always writes `idMap/`, whatever `output_debug` says. Every Scala places config sets `outputDebug` to true, so production output stays the same, and a debug-off run gains those folders. Scala's debug-off path, a plain `df.checkpoint()` into `checkpoints/`, is not ported. This keeps Scala's four stages until cutover, where splitting matching into more stages would change the layout.
+- Transformation functions are pure. S3 reads and writes happen only in each theme's `run()`, in `run_stage`, and in `io.checkpoint`. Stages that checkpoint take an `output_path`, and `io.checkpoint(df, output_path, name, feature_type)` writes `df` to `<run>/<name>/` and returns a read of it. That cuts the lineage, so later transformations don't recompute earlier ones and the query plan stays small. Matching checkpoints after blocking, where about 42B spatial pairs shrink to about 170M. Checkpoint outputs stay with the run. Places matching always writes `blocking/`, `scores/` and `matches_validated/` through `io.checkpoint`, and `assign_ids` always writes `idMap/`. Every Scala places config sets `outputDebug` to true, so production output stays the same. The Python job has no `outputDebug` param and ignores one if passed. Scala's debug-off path, a plain `df.checkpoint()` into `checkpoints/`, is not ported. This keeps Scala's four stages until cutover, where splitting matching into more stages would change the layout.
 - A DataFrame that two branches of one stage read gets an explicit `.cache()`. In `match_places`, candidates feed both the history pairs and the spatial union. `run_stage` writes each output separately, so upstream work shared by two outputs of one stage gets cached before the stage returns: in `assign_ids`, `final` and `fallout` both come from the cluster winner selection, which Scala caches too.
 - Each stage output's columns are defined by the `select` that produces it, as in Scala (the transformer's required-columns list, the `MatchResult` columns). There is no separate schema validation layer for now; schema tracking across Overture pipelines is an open, org-wide question.
 - Setup functions build one `select` from a list of column expressions. A `withColumn` chain adds one projection per column to the query plan.

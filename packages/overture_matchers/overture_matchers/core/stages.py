@@ -53,7 +53,13 @@ class MetricsOutput(NamedTuple):
 def _output_type(stage_fn: Callable[..., T]) -> type[T]:
     # Only the return annotation is resolved: get_type_hints would also resolve
     # parameter types, which are often imported only for type checking.
-    hint = stage_fn.__annotations__["return"]
+    try:
+        hint = stage_fn.__annotations__["return"]
+    except KeyError:
+        raise TypeError(
+            f"stage {stage_fn.__name__} needs a NamedTuple return annotation"
+        ) from None
+    # The hint is the stage's own annotation, never job input.
     return eval(hint, stage_fn.__globals__) if isinstance(hint, str) else hint
 
 

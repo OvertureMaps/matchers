@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 by the Overture Maps Foundation
-"""Tests the places job wiring: stage names, output names, local runner and job."""
+"""Tests the places job wiring: stage chaining, output names, local runner and job."""
 
 import json
 
@@ -14,11 +14,6 @@ from overture_matchers.core.stages import (
     SetupOutput,
 )
 from overture_matchers.places import job
-
-
-def test_stage_function_names_are_marker_names():
-    names = [f.__name__ for f in (job.setup, job.matching, job.assign_ids, job.metrics)]
-    assert names == ["setup", "matching", "assign_ids", "metrics"]
 
 
 def test_output_names_match_scala_postfixes_and_are_unique():
@@ -67,17 +62,43 @@ def test_run_rejects_a_missing_model_jar(spark, params):
         job.run(spark, job.RunConfig.from_params(params))
 
 
-def test_run_passes_match_history_to_setup(spark, params, monkeypatch):
-    seen = []
+def test_run_chains_stage_outputs_and_skips_on_rerun(spark, params, monkeypatch):
+    calls = {}
 
     def setup(raw, match_history=True) -> SetupOutput:
-        seen.append(match_history)
-        raise NotImplementedError
+        calls["setup"] = (raw.candidates.count(), match_history)
+        return SetupOutput(spark.range(3), spark.range(4))
 
-    monkeypatch.setattr(job, "setup", setup)
-    with pytest.raises(NotImplementedError):
-        job.run(spark, job.RunConfig.from_params(params | {"matchHistory": "false"}))
-    assert seen == [False]
+    def matching(prepared, output_path=None) -> MatchingOutput:
+        calls["matching"] = (
+            prepared.candidates.count(),
+            prepared.baseline.count(),
+            output_path,
+        )
+        return MatchingOutput(spark.range(5))
+
+    def assign_ids(raw, prepared, matched, output_path=None) -> AssignIdsOutput:
+        calls["assign_ids"] = (matched.matches.count(), output_path)
+        return AssignIdsOutput(spark.range(6), spark.range(7))
+
+    def metrics(raw, prepared, matched, ids) -> MetricsOutput:
+        calls["metrics"] = (ids.final.count(), ids.fallout.count())
+        return MetricsOutput(spark.range(1))
+
+    for fake in (setup, matching, assign_ids, metrics):
+        monkeypatch.setattr(job, fake.__name__, fake)
+    config = job.RunConfig.from_params(params | {"matchHistory": "false"})
+    job.run(spark, config)
+    run = params["outputPath"]
+    assert calls == {
+        "setup": (2, False),
+        "matching": (3, 4, run),
+        "assign_ids": (5, run),
+        "metrics": (6, 7),
+    }
+    calls.clear()
+    job.run(spark, config)
+    assert calls == {}
 
 
 def test_run_local_reads_params_file(spark, tmp_path, params):

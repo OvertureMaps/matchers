@@ -26,13 +26,12 @@ _PARAM_FIELDS = {
     "baseline": "baseline",
     "provider": "provider",
     "matchHistory": "match_history",
-    "outputDebug": "output_debug",
     "embeddingsCacheTable": "embeddings_cache_table",
     "previousMetricsPath": "previous_metrics_path",
     "modelJar": "model_jar",
 }
 _REQUIRED = ("output_path", "input", "baseline", "provider")
-_BOOLS = ("match_history", "output_debug")
+_BOOLS = ("match_history",)
 _PATH_MAPS = ("input", "baseline")
 
 
@@ -67,7 +66,6 @@ class RunConfig:
 
     Attributes:
         match_history: Whether candidates with history matches skip scoring.
-        output_debug: Scala's debug flag. Intermediate outputs are always written.
         model_jar: The ``places-matcher-model`` jar. Only places reads it.
     """
 
@@ -75,9 +73,8 @@ class RunConfig:
     input: dict[str, list[str]]
     baseline: dict[str, list[str]]
     provider: str
-    # Scala's theme configs default both to true.
+    # Scala's theme configs default this to true.
     match_history: bool = True
-    output_debug: bool = True
     embeddings_cache_table: str | None = None
     previous_metrics_path: str | None = None
     model_jar: str | None = None
@@ -96,6 +93,7 @@ class RunConfig:
         missing = [f for f in _REQUIRED if f not in values]
         if missing:
             raise ValueError(f"missing required params: {missing}")
+        values["output_path"] = values["output_path"].rstrip("/")
         for field in _BOOLS:
             if field in values:
                 values[field] = _parse_bool(values[field])
