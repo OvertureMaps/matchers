@@ -34,7 +34,7 @@ jobs:
       - name: Find changed package directories
         id: changed-dirs
         if: github.event_name != 'workflow_dispatch'
-        uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v47.0.6
+        uses: lowlysre/are-we-changed@6055afb587c46c0585ddc7caac0cbfe65322622a # v0.1.0
         with:
           files: packages/**
           files_ignore: packages/**/*.md
@@ -48,7 +48,7 @@ jobs:
       - name: Find changed package CI workflows
         id: ci-changed
         if: github.event_name != 'workflow_dispatch'
-        uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v47.0.6
+        uses: lowlysre/are-we-changed@6055afb587c46c0585ddc7caac0cbfe65322622a # v0.1.0
         with:
           files: |
             .github/workflows/test_python.yml
