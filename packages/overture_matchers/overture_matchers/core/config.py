@@ -53,12 +53,16 @@ def _parse_table_map(value: Any) -> dict[str, list[str]]:
     """Accept ``{table: path | [paths]}`` as a dict or a JSON string."""
     if isinstance(value, str):
         value = json.loads(value)
+    error = TypeError(f"expected a {{table: path | [paths]}} map, got {value!r}")
     if not isinstance(value, dict):
-        raise TypeError(f"expected a {{table: paths}} map, got {value!r}")
-    return {
-        table: [paths] if isinstance(paths, str) else list(paths)
-        for table, paths in value.items()
-    }
+        raise error
+    tables = {}
+    for table, paths in value.items():
+        paths = [paths] if isinstance(paths, str) else paths
+        if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+            raise error
+        tables[table] = paths
+    return tables
 
 
 @dataclass(frozen=True)
