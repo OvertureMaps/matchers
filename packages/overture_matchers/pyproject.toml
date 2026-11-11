@@ -18,7 +18,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
 ]
 # AWS Glue provides Spark and Sedona at runtime, so both stay dev dependencies.
-dependencies = ["overture-spark>=0.6.0"]
+dependencies = ["overture-spark>=1.0.0"]
 
 [project.urls]
 Homepage = "https://github.com/OvertureMaps/matchers"

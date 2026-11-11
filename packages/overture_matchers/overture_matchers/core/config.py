@@ -10,6 +10,7 @@ from importlib.metadata import version
 from typing import TYPE_CHECKING, Any
 
 from overture_spark.hadoop_fs import list_files, read_json, write_text
+from overture_spark.job import is_unset
 
 from overture_matchers.core import io
 
@@ -33,11 +34,6 @@ _PARAM_FIELDS = {
 _REQUIRED = ("output_path", "input", "baseline", "provider")
 _BOOLS = ("match_history", "output_debug")
 _TABLE_MAPS = ("input", "baseline")
-
-
-def _is_unset(value: Any) -> bool:
-    # The DAG sends "none" (or a rendered Python None) for "use the default".
-    return value is None or str(value).strip().lower() in ("", "none")
 
 
 def _parse_bool(value: Any) -> bool:
@@ -95,7 +91,7 @@ class RunConfig:
         values = {
             field: params[param]
             for param, field in _PARAM_FIELDS.items()
-            if not _is_unset(params.get(param))
+            if not is_unset(params.get(param))
         }
         missing = [f for f in _REQUIRED if f not in values]
         if missing:
