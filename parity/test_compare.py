@@ -27,19 +27,27 @@ def sql_value(v) -> str:
 
 
 def write(run: Path, folder: str, columns: list[str], rows: list[tuple]) -> None:
-    """Write rows as one parquet file in `<run>/<folder>/type=place/`."""
+    """Write rows as one parquet file in `<run>/<folder>/type=place/`. No rows writes an empty file of string columns."""
     out = run / folder / "type=place"
     out.mkdir(parents=True)
-    values = ", ".join("(" + ", ".join(sql_value(v) for v in r) + ")" for r in rows)
+    where = "" if rows else "WHERE false"
+    rows = rows or [tuple(None for _ in columns)]
+    values = ", ".join(
+        "(" + ", ".join(f"{sql_value(v)}::VARCHAR" for v in r) + ")" for r in rows
+    )
     duckdb.sql(
-        f"COPY (SELECT * FROM (VALUES {values}) t({', '.join(columns)})) TO '{out}/part-0.parquet'"
+        f"COPY (SELECT * FROM (VALUES {values}) t({', '.join(columns)}) {where}) TO '{out}/part-0.parquet'"
     )
 
 
 def make_run(
-    root: Path, name: str, matches=REFERENCE_MATCHES, ids=REFERENCE_IDS
+    root: Path, name: str, matches=REFERENCE_MATCHES, ids=REFERENCE_IDS, fallout=()
 ) -> str:
-    """A run folder with the outputs compare.py reads. `matches` rows are (id, base_id, match_sub_type, cluster_id)."""
+    """A run folder with the outputs compare.py reads.
+
+    `matches` rows are (id, base_id, match_sub_type, cluster_id), and `fallout`
+    rows are (id, duplicate_of).
+    """
     run = root / name
     write(run, "baseline", ["id"], [(b,) for b in BASELINE])
     write(
@@ -49,6 +57,7 @@ def make_run(
         [(c, k) for c, k in CANDIDATES.items()],
     )
     write(run, "idMap", ["id", "assigned_id"], list(ids.items()))
+    write(run, "fallout", ["id", "duplicate_of"], list(fallout))
     rows = [(i, b, "nomatch" if b is None else "match", s, k) for i, b, s, k in matches]
     write(
         run,
@@ -127,3 +136,13 @@ def test_candidate_missing_from_one_run_disagrees(tmp_path):
         tmp_path, "b", ids={k: v for k, v in REFERENCE_IDS.items() if k != "c1"}
     )
     assert compare(a, b)["ids"]["same_id_share"] == 0.75
+
+
+def test_fallout_candidate_lost_in_one_run_disagrees(tmp_path):
+    ids = {k: v for k, v in REFERENCE_IDS.items() if k != "c2"}
+    a = make_run(tmp_path, "a", ids=ids, fallout=[("c2", "c1")])
+    same = make_run(tmp_path, "same", ids=ids, fallout=[("c2", "c1")])
+    lost = make_run(tmp_path, "lost", ids=ids)
+    r = compare(a, same)["ids"]
+    assert (r["records"], r["same_id_share"]) == (4, 1.0)
+    assert compare(a, lost)["ids"]["same_id_share"] == 0.75
