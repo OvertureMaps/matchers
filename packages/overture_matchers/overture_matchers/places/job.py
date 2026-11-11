@@ -14,14 +14,13 @@ from overture_spark.job import SparkSedonaJob
 
 from overture_matchers.core import io
 from overture_matchers.core.config import RunConfig
+from overture_matchers.core.local import run_local
 from overture_matchers.core.stages import (
     AssignIdsOutput,
     MatchingOutput,
     MetricsOutput,
     RawInputs,
     SetupOutput,
-    no_checkpoint,
-    run_local,
     run_stage,
 )
 
@@ -38,9 +37,7 @@ def setup(raw: RawInputs, match_history: bool = True) -> SetupOutput:
     raise NotImplementedError("places setup is not ported yet")
 
 
-def matching(
-    prepared: SetupOutput, checkpoint: io.Checkpoint = no_checkpoint
-) -> MatchingOutput:
+def matching(prepared: SetupOutput, output_path: str | None = None) -> MatchingOutput:
     """Generate pairs, score them and cluster the matches."""
     raise NotImplementedError("places matching is not ported yet")
 
@@ -49,7 +46,7 @@ def assign_ids(
     raw: RawInputs,
     prepared: SetupOutput,
     matched: MatchingOutput,
-    checkpoint: io.Checkpoint = no_checkpoint,
+    output_path: str | None = None,
 ) -> AssignIdsOutput:
     """Pick cluster winners and assign GERS IDs."""
     raise NotImplementedError("places assign_ids is not ported yet")
@@ -77,13 +74,21 @@ def run(spark: SparkSession, config: RunConfig) -> None:
         spark.read.parquet(*config.input[TABLE]),
         spark.read.parquet(*config.baseline[TABLE]),
     )
-    checkpoint = io.checkpointer(spark, config.output_path, TABLE)
     prepared = run_stage(
         spark, config, TABLE, setup, raw, match_history=config.match_history
     )
-    matched = run_stage(spark, config, TABLE, matching, prepared, checkpoint=checkpoint)
+    matched = run_stage(
+        spark, config, TABLE, matching, prepared, output_path=config.output_path
+    )
     ids = run_stage(
-        spark, config, TABLE, assign_ids, raw, prepared, matched, checkpoint=checkpoint
+        spark,
+        config,
+        TABLE,
+        assign_ids,
+        raw,
+        prepared,
+        matched,
+        output_path=config.output_path,
     )
     run_stage(spark, config, TABLE, metrics, raw, prepared, matched, ids)
 

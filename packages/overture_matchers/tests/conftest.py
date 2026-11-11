@@ -6,8 +6,8 @@ import os
 import sys
 
 import pytest
+from overture_spark import SparkPlatform, getSparkSedonaSession
 
-from overture_matchers.core.stages import local_sedona_session
 from overture_matchers.places.job import PACKAGES
 
 
@@ -16,9 +16,10 @@ def spark():
     # UDF workers must run under this venv's interpreter, which is
     # sys.executable here.
     os.environ["PYSPARK_PYTHON"] = sys.executable
-    session = local_sedona_session(
-        PACKAGES,
-        {
+    session = getSparkSedonaSession(
+        spark_platform=SparkPlatform.LOCAL,
+        extra_packages=list(PACKAGES),
+        extra_spark_conf={
             "spark.master": "local[1]",
             "spark.app.name": "overture-matchers-tests",
             # The driver binds to loopback, because the hostname often fails to

@@ -6,12 +6,12 @@ import json
 
 import pytest
 
+from overture_matchers.core.local import run_local
 from overture_matchers.core.stages import (
     AssignIdsOutput,
     MatchingOutput,
     MetricsOutput,
     SetupOutput,
-    run_local,
 )
 from overture_matchers.places import job
 

@@ -4,9 +4,7 @@
 
 from __future__ import annotations
 
-import json
-from collections.abc import Callable, Sequence
-from pathlib import Path
+from collections.abc import Callable
 from typing import TYPE_CHECKING, NamedTuple, ParamSpec, TypeVar
 
 from overture_matchers.core import io
@@ -52,11 +50,6 @@ class MetricsOutput(NamedTuple):
     metrics: DataFrame
 
 
-def no_checkpoint(df: DataFrame, name: str) -> DataFrame:
-    """A checkpoint that writes nothing."""
-    return df
-
-
 def _output_type(stage_fn: Callable[..., T]) -> type[T]:
     # Only the return annotation is resolved: get_type_hints would also resolve
     # parameter types, which are often imported only for type checking.
@@ -74,8 +67,9 @@ def run_stage(
 ) -> T:
     """Run ``stage_fn`` unless its marker exists, and return reads of its outputs.
 
-    ``stage_fn.__name__`` names the marker, and its return annotation names the
-    outputs. The marker is written only after every output.
+    The stage marker gets its name from ``stage_fn.__name__``. The output folders
+    get their names from the fields of ``stage_fn``'s return type. The marker is
+    written only after every output.
     """
     stage = stage_fn.__name__
     output_type = _output_type(stage_fn)
@@ -91,33 +85,3 @@ def run_stage(
             for name in output_type._fields
         )
     )
-
-
-def local_sedona_session(
-    packages: Sequence[str] = (), conf: dict[str, str] | None = None
-) -> SparkSession:
-    """Start a local Sedona session that also loads ``packages``.
-
-    Args:
-        packages: Extra Maven coordinates, such as a theme's GraphFrames jar.
-        conf: Extra Spark settings.
-    """
-    from overture_spark import SparkPlatform, getSparkSedonaSession
-
-    return getSparkSedonaSession(
-        spark_platform=SparkPlatform.LOCAL,
-        extra_packages=list(packages),
-        extra_spark_conf=conf,
-    )
-
-
-def run_local(
-    run: Callable[[SparkSession, RunConfig], None],
-    params_file: str,
-    spark: SparkSession | None = None,
-    packages: Sequence[str] = (),
-) -> None:
-    """Run a theme's ``run`` from a JSON params file, on a local Sedona session."""
-    spark = spark or local_sedona_session(packages)
-    params = json.loads(Path(params_file).read_text())
-    run(spark, RunConfig.for_run(spark, params))

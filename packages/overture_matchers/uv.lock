@@ -119,7 +119,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "overture-spark", specifier = ">=0.4.1" }]
+requires-dist = [{ name = "overture-spark", specifier = ">=0.6.0" }]
 
 [package.metadata.requires-dev]
 dev = [
@@ -130,11 +130,11 @@ dev = [
 
 [[package]]
 name = "overture-spark"
-version = "0.4.1"
+version = "0.6.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/08/71/258b4440d698980f456637ada7e0db44c17648b5dd73d341b06371b99568/overture_spark-0.4.1.tar.gz", hash = "sha256:fb2b845a079a9c2dd127cc68ba4a63fbbfd2dc34c8e6ec222a8a7515dace53c4", size = 190638, upload-time = "2026-11-09T17:21:23.352Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/63/08/0712fea97c5cbfbfd2637d37f9d456f62b8dfd9388acbfa6d585cbcf3bfa/overture_spark-0.6.0.tar.gz", hash = "sha256:71d5b85f3d1d36053c3ae16db4a68c7df3bc052a56edd890371bf4ee58e8a962", size = 191235, upload-time = "2026-11-09T19:25:24.852Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/20/6a/e2a04d728dac0f30d6caf38c487c463f07ff4949e2dfbd5931460af42830/overture_spark-0.4.1-py3-none-any.whl", hash = "sha256:812d6fa09b3ac1e8effed9f9cfb583ebc6ddf1b798620936e64841eec3a22f33", size = 22405, upload-time = "2026-11-09T17:21:21.853Z" },
+    { url = "https://files.pythonhosted.org/packages/89/39/daa6fcba39d535361428a96fc72e30301858044288fefd97fb2a30d50a7f/overture_spark-0.6.0-py3-none-any.whl", hash = "sha256:d32df3f1e3a50974a95d9bdaa7c135375f070bf7cbca5a9f9e4437c53a084fc3", size = 22684, upload-time = "2026-11-09T19:25:23.271Z" },
 ]
 
 [[package]]

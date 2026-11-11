@@ -4,16 +4,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from overture_spark.hadoop_fs import list_files
+from overture_spark.hadoop_fs import list_files, write_text
 from pyspark.sql import DataFrame
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
-
-Checkpoint = Callable[[DataFrame, str], DataFrame]
 
 MARKER_DIR = "_completed_stages"
 
@@ -26,19 +23,6 @@ def run_uri(output_path: str, *parts: str) -> str:
 def output_uri(output_path: str, name: str, table: str) -> str:
     """URI of an output folder."""
     return run_uri(output_path, name, f"type={table}")
-
-
-def write_file(spark: SparkSession, uri: str, text: str) -> None:
-    """Write a small text file through the driver, replacing any file there."""
-    if uri.startswith("s3://"):
-        uri = "s3a://" + uri[len("s3://") :]
-    path = spark._jvm.org.apache.hadoop.fs.Path(uri)
-    fs = path.getFileSystem(spark._jsc.hadoopConfiguration())
-    stream = fs.create(path, True)
-    try:
-        stream.write(bytearray(text.encode("utf-8")))
-    finally:
-        stream.close()
 
 
 def write_output(output_path: str, name: str, table: str, df: DataFrame) -> None:
@@ -66,17 +50,17 @@ def stage_is_done(spark: SparkSession, output_path: str, stage: str) -> bool:
 
 def mark_stage_done(spark: SparkSession, output_path: str, stage: str) -> None:
     """Write the marker that makes reruns skip ``stage``."""
-    write_file(spark, _marker_uri(output_path, stage), "")
+    write_text(spark, _marker_uri(output_path, stage), "")
 
 
-def checkpointer(spark: SparkSession, output_path: str, table: str) -> Checkpoint:
-    """Build ``checkpoint(df, name)``, which writes ``df`` and returns a read of it.
+def checkpoint(
+    df: DataFrame, output_path: str | None, name: str, table: str
+) -> DataFrame:
+    """Write ``df`` and return a read of it, which has no lineage back to ``df``.
 
-    The read has no lineage back to ``df``, so later steps don't recompute it.
+    Returns ``df`` unchanged when ``output_path`` is None, so stages run in memory.
     """
-
-    def checkpoint(df: DataFrame, name: str) -> DataFrame:
-        write_output(output_path, name, table, df)
-        return read_output(spark, output_path, name, table)
-
-    return checkpoint
+    if output_path is None:
+        return df
+    write_output(output_path, name, table, df)
+    return read_output(df.sparkSession, output_path, name, table)

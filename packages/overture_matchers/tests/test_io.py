@@ -32,8 +32,12 @@ def test_checkpoint_writes_and_cuts_lineage(spark, tmp_path):
     source = str(tmp_path / "source")
     spark.range(4).write.parquet(source)
     df = spark.read.parquet(source).filter("id > 0")
-    checkpoint = io.checkpointer(spark, str(tmp_path / "run"), "place")
-    result = checkpoint(df, "blocking")
+    result = io.checkpoint(df, str(tmp_path / "run"), "blocking", "place")
     assert result.count() == 3
     assert all("/run/blocking/type=place/" in f for f in result.inputFiles())
     assert not any("/source/" in f for f in result.inputFiles())
+
+
+def test_checkpoint_without_output_path_returns_df(spark):
+    df = spark.range(2)
+    assert io.checkpoint(df, None, "blocking", "place") is df

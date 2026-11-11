@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from importlib.metadata import version
 from typing import TYPE_CHECKING, Any
 
-from overture_spark.hadoop_fs import list_files, read_text
+from overture_spark.hadoop_fs import list_files, read_json, write_text
 
 from overture_matchers.core import io
 
@@ -17,7 +17,8 @@ if TYPE_CHECKING:
     from pyspark.sql import SparkSession
 
 # Job param (Scala's argument name) -> field. Params outside this table are ignored,
-# so argument sets cloned from Scala runs still work.
+# so argument sets cloned from Scala runs still work. Job params keep Scala's names
+# until cutover. After that, the DAG can send field names and this table goes.
 _PARAM_FIELDS = {
     "outputPath": "output_path",
     "input": "input",
@@ -119,9 +120,7 @@ class RunConfig:
         config = cls.from_params(params)
         path = io.run_uri(config.output_path, "config.json")
         record = config.to_json()
-        if list_files(spark, path) and json.loads(read_text(spark, path)) != (
-            json.loads(record)
-        ):
+        if list_files(spark, path) and read_json(spark, path) != json.loads(record):
             raise ValueError(f"{path} was written with different params")
-        io.write_file(spark, path, record)
+        write_text(spark, path, record)
         return config
