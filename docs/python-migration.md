@@ -124,13 +124,13 @@ def matching(
     prepared: SetupOutput,
     model: PlacesModel,
     embeddings: DataFrame | None = None,
-    checkpoint: Checkpoint = no_checkpoint,
+    output_path: str | None = None,
 ) -> MatchingOutput: ...  # pairs, scoring, clusters
 def assign_ids(
     raw: RawInputs,
     prepared: SetupOutput,
     matched: MatchingOutput,
-    checkpoint: Checkpoint = no_checkpoint,
+    output_path: str | None = None,
 ) -> AssignIdsOutput: ...  # cluster winners, GERS IDs
 def metrics(
     raw, prepared, matched, ids, previous
@@ -148,7 +148,6 @@ def run(spark, config):
         read_tables(spark, config.input), read_tables(spark, config.baseline)
     )
     model = PlacesModel.load()
-    checkpoint = io.checkpointer(spark, config.output_path, TABLE)
 
     prepared = run_stage(
         spark, config, TABLE, setup, raw, match_history=config.match_history
@@ -161,10 +160,17 @@ def run(spark, config):
         prepared,
         model,
         embeddings=read_embeddings(spark, config),  # None when no table is set
-        checkpoint=checkpoint,
+        output_path=config.output_path,
     )
     ids = run_stage(
-        spark, config, TABLE, assign_ids, raw, prepared, matched, checkpoint=checkpoint
+        spark,
+        config,
+        TABLE,
+        assign_ids,
+        raw,
+        prepared,
+        matched,
+        output_path=config.output_path,
     )
     run_stage(
         spark,
@@ -201,10 +207,6 @@ P = ParamSpec("P")
 T = TypeVar("T")
 
 
-def no_checkpoint(df, name):
-    return df
-
-
 def run_stage(
     spark,
     config,
@@ -229,20 +231,29 @@ def run_stage(
             for name in output_type._fields
         )
     )
+```
 
+`core/local.py` holds `run_local`, which backs each theme's `python -m` entry point:
 
-def run_local(run, params_file):
+```python
+def run_local(run, params_file, packages=()):
+    spark = getSparkSedonaSession(
+        spark_platform=SparkPlatform.LOCAL, extra_packages=list(packages)
+    )
     params = json.loads(Path(params_file).read_text())
-    spark = local_sedona_session()
     run(spark, RunConfig.for_run(spark, params))
 ```
 
-To explore, you can call a stage function directly, e.g. `matching(SetupOutput(my_candidates, my_baseline), model)`. With the default `no_checkpoint` this doesn't write anything, which is fine for small datasets.
+To explore, you can call a stage function directly, e.g. `matching(SetupOutput(my_candidates, my_baseline), model)`. With the default `output_path=None` this doesn't write anything, which is fine for small datasets.
 
 Where the little `io` helper has functions like:
 
 ```python
-Checkpoint = Callable[[DataFrame, str], DataFrame]
+def checkpoint(df, output_path, name, table):
+    if output_path is None:
+        return df
+    write_output(output_path, name, table, df)
+    return read_output(df.sparkSession, output_path, name, table)
 
 
 def stage_is_done(spark, output_path, stage_name):
@@ -310,8 +321,9 @@ packages/
     overture_matchers/
       core/              # run plumbing only, no matching logic
         config.py        # frozen dataclass RunConfig, built from the job params; config.json write and check
-        io.py            # read_output/write_output, Checkpoint and checkpointer, stage markers
-        stages.py        # stage output types, run_stage, run_local
+        io.py            # read_output/write_output, checkpoint, stage markers
+        local.py         # run_local, the local entry point
+        stages.py        # stage output types, run_stage
       clustering.py      # connected components, greedy, simple
       ids.py             # GERS ID minting
       prematch.py        # overrides and history pre-matches
@@ -446,7 +458,7 @@ Implementation details behind the design above.
 
 ### Rules
 
-- Transformation functions are pure. S3 reads and writes happen only in each theme's `run()`, in `run_stage`, and in the checkpoint function from `io.checkpointer(output_path)`. Calling it as `checkpoint(df, name)` writes `df` to `<run>/<name>/` and returns a read of it. That cuts the lineage, so later transformations don't recompute earlier ones and the query plan stays small. Matching checkpoints after blocking, where about 42B spatial pairs shrink to about 170M. Checkpoint outputs stay with the run. Places matching always writes `blocking/`, `scores/` and `matches_validated/` through the checkpoint function, and `assign_ids` always writes `idMap/`, whatever `output_debug` says. Every Scala places config sets `outputDebug` to true, so production output stays the same, and a debug-off run gains those folders. Scala's debug-off path, a plain `df.checkpoint()` into `checkpoints/`, is not ported. This keeps Scala's four stages until cutover, where splitting matching into more stages would change the layout.
+- Transformation functions are pure. S3 reads and writes happen only in each theme's `run()`, in `run_stage`, and in `io.checkpoint`. Stages that checkpoint take an `output_path`, and `io.checkpoint(df, output_path, name, table)` writes `df` to `<run>/<name>/` and returns a read of it. That cuts the lineage, so later transformations don't recompute earlier ones and the query plan stays small. Matching checkpoints after blocking, where about 42B spatial pairs shrink to about 170M. Checkpoint outputs stay with the run. Places matching always writes `blocking/`, `scores/` and `matches_validated/` through `io.checkpoint`, and `assign_ids` always writes `idMap/`, whatever `output_debug` says. Every Scala places config sets `outputDebug` to true, so production output stays the same, and a debug-off run gains those folders. Scala's debug-off path, a plain `df.checkpoint()` into `checkpoints/`, is not ported. This keeps Scala's four stages until cutover, where splitting matching into more stages would change the layout.
 - A DataFrame that two branches of one stage read gets an explicit `.cache()`. In `match_places`, candidates feed both the history pairs and the spatial union. `run_stage` writes each output separately, so upstream work shared by two outputs of one stage gets cached before the stage returns: in `assign_ids`, `final` and `fallout` both come from the cluster winner selection, which Scala caches too.
 - Each stage output's columns are defined by the `select` that produces it, as in Scala (the transformer's required-columns list, the `MatchResult` columns). There is no separate schema validation layer for now; schema tracking across Overture pipelines is an open, org-wide question.
 - Setup functions build one `select` from a list of column expressions. A `withColumn` chain adds one projection per column to the query plan.
