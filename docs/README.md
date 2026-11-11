@@ -1,7 +1,7 @@
 ![matchers: conflation for Overture Maps data, in PySpark](assets/hero.svg)
 
 [![Test Python](https://github.com/OvertureMaps/matchers/actions/workflows/test_python.yml/badge.svg?branch=main)](https://github.com/OvertureMaps/matchers/actions/workflows/test_python.yml)
-[![Lint](https://github.com/OvertureMaps/matchers/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/OvertureMaps/matchers/actions/workflows/lint.yml)
+[![Lint](https://github.com/OvertureMaps/matchers/actions/workflows/lint.yml/badge.svg)](https://github.com/OvertureMaps/matchers/actions/workflows/lint.yml)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-4051CC?labelColor=001A39)](../.python-version)
 [![Spark 3.5](https://img.shields.io/badge/Spark-3.5-4051CC?labelColor=001A39)](../packages/overture_matchers/pyproject.toml)
 [![uv](https://img.shields.io/badge/managed%20with-uv-0EC1BD?labelColor=001A39)](https://docs.astral.sh/uv/)
