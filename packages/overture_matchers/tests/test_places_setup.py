@@ -11,8 +11,10 @@ from overture_matchers.core.stages import RawInputs
 from overture_matchers.places.coreword import h3_parent
 from overture_matchers.places.job import SetupOutput, setup
 from overture_matchers.places.prepare import (
+    _address_columns,
     _clean_utf8,
     _signature,
+    _website_columns,
     add_base_ids,
     normalize_phone,
     prepare_baseline,
@@ -180,10 +182,16 @@ def test_add_base_ids(spark):
 
 
 def test_clean_utf8_replaces_invalid_bytes(spark):
-    df = spark.range(1).select(
-        _clean_utf8(F.unhex(F.lit("41FF42")).cast("binary").cast("string")).alias("s")
+    raw = F.unhex(F.lit("41FF42")).cast("string")
+    row = (
+        spark.range(1)
+        .select(
+            F.hex(raw.cast("binary")).alias("raw"),
+            F.hex(F.encode(_clean_utf8(raw), "UTF-8")).alias("clean"),
+        )
+        .first()
     )
-    assert df.first().s == "A\ufffdB"
+    assert (row.raw, row.clean) == ("41FF42", "41EFBFBD42")
 
 
 def test_signature_joins_lowercased_non_null_parts(spark):
@@ -201,3 +209,40 @@ def test_signature_joins_lowercased_non_null_parts(spark):
         .first()
     )
     assert row.s == "src@0123@main st@cafe"
+
+
+def _components(*pairs):
+    parts = [
+        F.struct(F.lit(k).alias("label"), F.lit(v).alias("value")) for k, v in pairs
+    ]
+    return F.array(*parts).cast("array<struct<label:string,value:string>>")
+
+
+def test_address_fallbacks(spark):
+    cases = [
+        ("1 Main St", [("house_number", "1"), ("road", "main st")], "main st"),
+        ("1 Main St", [("house_number", "1"), ("city", "x")], ""),
+        ("1 Main St", [("house_number", "1")], "Main St"),
+        ("Main St", [], "Main St"),
+    ]
+    rows = [
+        spark.range(1)
+        .select(
+            F.array(F.struct(F.lit(f).alias("freeform"))).alias("addresses"),
+            _components(*c).alias("c"),
+        )
+        .select(_address_columns(F.col("c"))[1].alias("a"))
+        .first()
+        .a
+        for f, c, _ in cases
+    ]
+    assert rows == [e for *_, e in cases]
+
+
+def test_website_columns(spark):
+    df = spark.createDataFrame(
+        [(["https://www.Example.com:8080/a/?q=1", "nodot"],)], "websites array<string>"
+    )
+    hosts, urls = _website_columns(df)
+    row = df.select(hosts.alias("h"), urls.alias("u")).first()
+    assert (row.h, row.u) == (["example.com", "nodot"], ["example.com:8080/a", "nodot"])

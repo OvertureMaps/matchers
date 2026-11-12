@@ -33,6 +33,7 @@ BLOCKING_RESOLUTION = 16
 LIBPOSTAL_DATA_DIR_CONF = "spark.sedona.libpostal.dataDir"
 _NORMALIZE_UDF = "normalize_text"
 _TOKENIZE_UDF = "tokenize_text"
+_COMPONENTS = "_components"
 _SIGNATURE_SEPARATOR = "@"
 _ACTIVE_STATE = "active"
 _NON_DIGITS = re.compile(r"[^0-9]")
@@ -123,13 +124,20 @@ def _component(components: Column, label: str) -> Column:
     return F.coalesce(first["value"], F.lit(""))
 
 
-def _address_columns() -> tuple[Column, Column]:
-    """``house_number`` and ``address`` parsed from the first address."""
-    first_address = F.col("addresses")[0]
-    freeform = _clean_utf8(first_address["freeform"])
-    locality = _clean_utf8(first_address["locality"])
-    query = F.concat_ws(" ", freeform, locality)
-    components = F.when(F.trim(query) != "", ParseAddress(query))
+def _freeform() -> Column:
+    return _clean_utf8(F.col("addresses")[0]["freeform"])
+
+
+def _parsed_components() -> Column:
+    """Libpostal components of the first address. Projected once as ``_COMPONENTS``."""
+    locality = _clean_utf8(F.col("addresses")[0]["locality"])
+    query = F.concat_ws(" ", _freeform(), locality)
+    return F.when(F.trim(query) != "", ParseAddress(query))
+
+
+def _address_columns(components: Column) -> tuple[Column, Column]:
+    """``house_number`` and ``address`` from the first address and its parsed ``components``."""
+    freeform = _freeform()
     house_number = _component(components, "house_number")
     street = _java_trim(
         F.regexp_replace(
@@ -179,7 +187,7 @@ def _matching_columns(
 ) -> dict[str, Column]:
     """Column expressions for one side, in Scala's column order."""
     country = _clean_utf8(F.col("addresses")[0]["country"])
-    house_number, address = _address_columns()
+    house_number, address = _address_columns(F.col(_COMPONENTS))
     name = F.col("names.primary")
     name_clean = F.call_udf(_NORMALIZE_UDF, name)
     address_clean = F.call_udf(_NORMALIZE_UDF, address)
@@ -225,7 +233,9 @@ def _prepare(
 ) -> DataFrame:
     columns = _matching_columns(df, provider, os.path.basename(model_jar)) | extra
     # One shuffle by id up front, as in Scala, so later joins start co-partitioned.
-    return df.repartition("id").select(*[c.alias(n) for n, c in columns.items()])
+    # Parsing is expensive, so it is projected once and every field reads that column.
+    parsed = df.repartition("id").withColumn(_COMPONENTS, _parsed_components())
+    return parsed.select(*[c.alias(n) for n, c in columns.items()])
 
 
 def prepare_candidates(df: DataFrame, provider: str, model_jar: str) -> DataFrame:
