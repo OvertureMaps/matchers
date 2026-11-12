@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 by the Overture Maps Foundation
-"""Readers for the binary sketch formats Spark writes, so Python workers can query them.
+"""A reader for the Bloom filter stored in the model jar, usable from Python workers.
 
-The model jar ships sketches written by Spark's JVM sketch classes. The sketches
-are approximate and the matcher's features include their errors, so the
-files are read as written rather than re-exported as exact lookups.
+A Bloom filter is a compact set that answers "is this item in it?" with
+occasionally wrong "yes" answers and never wrong "no" answers. Spark's JVM
+code wrote this one into the jar as a binary file, and the setup stage asks it
+which tokens are common in a given H3 cell. Python reads that file directly
+and reproduces Spark's hashing, so it gets the same answers the JVM does.
 """
 
 from __future__ import annotations
