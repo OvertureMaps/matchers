@@ -72,7 +72,7 @@ def ship_resources(spark: SparkSession, model_jar: str) -> None:
     if not data_dir:
         raise ValueError(f"set {LIBPOSTAL_DATA_DIR_CONF} to the libpostal v1.0.0 data")
     spark.sparkContext.addFile(model_jar)
-    # Sedona reads a local data dir in place. Only remote data needs shipping.
+    # Local data dirs work as-is; only remote data needs shipping.
     if "://" in data_dir and not data_dir.startswith("file:"):
         spark.sparkContext.addFile(data_dir, recursive=True)
 
