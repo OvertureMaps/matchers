@@ -7,12 +7,15 @@ Run locally with ``python -m overture_matchers.places.job <params.json>``.
 
 from __future__ import annotations
 
+import logging
 import sys
 from typing import TYPE_CHECKING
 
+from overture_spark.hadoop_fs import list_files
 from overture_spark.job import SparkSedonaJob
 from pyspark import StorageLevel
 
+from overture_matchers import ids
 from overture_matchers.core import io
 from overture_matchers.core.config import RunConfig
 from overture_matchers.core.local import run_local
@@ -24,6 +27,10 @@ from overture_matchers.core.stages import (
     SetupOutput,
     run_stage,
 )
+from overture_matchers.metrics import MetricInputs, to_frame
+from overture_matchers.metrics import compute as compute_metrics
+from overture_matchers.places import model_jar
+from overture_matchers.places.metrics import METRICS, sample_score_files
 from overture_matchers.places.prepare import (
     add_base_ids,
     baseline_provider_column,
@@ -35,11 +42,15 @@ from overture_matchers.places.runtime import (
     register_text_udfs,
     ship_model_and_libpostal_data_to_workers,
 )
+from overture_matchers.places.selection import select_winners
 
 if TYPE_CHECKING:
-    from pyspark.sql import SparkSession
+    from pyspark.sql import DataFrame, SparkSession
+
+logger = logging.getLogger(__name__)
 
 FEATURE_TYPE = "place"
+THEME = "places"
 # GraphFrames build. Its jar also carries the Python API.
 PACKAGES = ("graphframes:graphframes:0.8.3-spark3.4-s_2.12",)
 
@@ -94,20 +105,90 @@ def assign_ids(
     raw: RawInputs,
     prepared: SetupOutput,
     matched: MatchingOutput,
+    provider: str,
     output_path: str | None = None,
 ) -> AssignIdsOutput:
     """Pick cluster winners and assign GERS IDs."""
-    raise NotImplementedError("places assign_ids is not ported yet")
+    winners, fallout = select_winners(matched.matches, prepared.baseline)
+    final = ids.assign_ids(
+        raw.candidates, winners, provider, output_path, feature_type=FEATURE_TYPE
+    )
+    return AssignIdsOutput(final, fallout)
 
 
 def metrics(
     raw: RawInputs,
     prepared: SetupOutput,
     matched: MatchingOutput,
-    ids: AssignIdsOutput,
+    assigned: AssignIdsOutput,
+    provider: str,
+    **optional: object,
 ) -> MetricsOutput:
-    """Count matches and churn."""
-    raise NotImplementedError("places metrics is not ported yet")
+    """Count matches and churn.
+
+    ``optional`` holds the `MetricInputs` fields that are not always there: ``blocking``,
+    ``scores``, ``score_sample``, ``feature_order``, ``reference`` and ``previous``.
+    """
+    inputs = MetricInputs(
+        raw.candidates,
+        raw.baseline,
+        prepared.candidates,
+        prepared.baseline,
+        matched.matches,
+        assigned.final,
+        provider,
+        **optional,
+    )
+    rows = compute_metrics(inputs, METRICS)
+    spark = raw.candidates.sparkSession
+    return MetricsOutput(to_frame(spark, rows, THEME, FEATURE_TYPE, provider))
+
+
+def _read_if_present(
+    spark: SparkSession, config: RunConfig, name: str
+) -> DataFrame | None:
+    uri = io.output_uri(config.output_path, name, FEATURE_TYPE)
+    return (
+        io.read_output(spark, config.output_path, name, FEATURE_TYPE)
+        if list_files(spark, uri)
+        else None
+    )
+
+
+def _try(description: str, load):
+    """The result of ``load()``, or None, with a warning, if it raises."""
+    try:
+        return load()
+    except Exception:
+        logger.exception("Skipping %s", description)
+        return None
+
+
+def _optional_metric_inputs(
+    spark: SparkSession, config: RunConfig
+) -> dict[str, object]:
+    """Load the metric inputs that a run may lack. Anything missing is left out."""
+    scores = _read_if_present(spark, config, "scores")
+    found = {
+        "blocking": _read_if_present(spark, config, "blocking"),
+        "scores": scores,
+        "score_sample": None if scores is None else sample_score_files(spark, scores),
+        "feature_order": _try(
+            "feature stats",
+            lambda: model_jar.read_feature_order(spark, config.model_jar),
+        ),
+        "reference": _try(
+            "reference z-scores",
+            lambda: model_jar.read_reference_dataset(spark, config.model_jar),
+        ),
+        "previous": _try(
+            "previous release z-scores",
+            lambda: spark.read.parquet(config.previous_metrics_path),
+        )
+        if config.previous_metrics_path
+        else None,
+    }
+    return {k: v for k, v in found.items() if v is not None}
 
 
 def run(spark: SparkSession, config: RunConfig) -> None:
@@ -136,7 +217,7 @@ def run(spark: SparkSession, config: RunConfig) -> None:
     matched = run_stage(
         spark, config, FEATURE_TYPE, matching, prepared, output_path=config.output_path
     )
-    ids = run_stage(
+    assigned = run_stage(
         spark,
         config,
         FEATURE_TYPE,
@@ -144,9 +225,21 @@ def run(spark: SparkSession, config: RunConfig) -> None:
         raw,
         prepared,
         matched,
+        config.provider,
         output_path=config.output_path,
     )
-    run_stage(spark, config, FEATURE_TYPE, metrics, raw, prepared, matched, ids)
+    run_stage(
+        spark,
+        config,
+        FEATURE_TYPE,
+        metrics,
+        raw,
+        prepared,
+        matched,
+        assigned,
+        config.provider,
+        **_optional_metric_inputs(spark, config),
+    )
 
 
 class PlacesMatchingJob(SparkSedonaJob):

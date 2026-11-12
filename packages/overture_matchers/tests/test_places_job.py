@@ -92,11 +92,13 @@ def test_run_chains_stage_outputs_and_skips_on_rerun(spark, params, monkeypatch)
         )
         return MatchingOutput(spark.range(5))
 
-    def assign_ids(raw, prepared, matched, output_path=None) -> AssignIdsOutput:
-        calls["assign_ids"] = (matched.matches.count(), output_path)
+    def assign_ids(
+        raw, prepared, matched, provider, output_path=None
+    ) -> AssignIdsOutput:
+        calls["assign_ids"] = (matched.matches.count(), provider, output_path)
         return AssignIdsOutput(spark.range(6), spark.range(7))
 
-    def metrics(raw, prepared, matched, ids) -> MetricsOutput:
+    def metrics(raw, prepared, matched, ids, provider, **optional) -> MetricsOutput:
         calls["metrics"] = (ids.final.count(), ids.fallout.count())
         return MetricsOutput(spark.range(1))
 
@@ -108,7 +110,7 @@ def test_run_chains_stage_outputs_and_skips_on_rerun(spark, params, monkeypatch)
     assert calls == {
         "setup": (2, False),
         "matching": (3, 4, run),
-        "assign_ids": (5, run),
+        "assign_ids": (5, config.provider, run),
         "metrics": (6, 7),
     }
     calls.clear()
