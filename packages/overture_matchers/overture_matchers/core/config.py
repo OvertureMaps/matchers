@@ -44,6 +44,11 @@ def _parse_bool(value: Any) -> bool:
     raise ValueError(f"expected true or false, got {value!r}")
 
 
+def _s3a(path: str) -> str:
+    # Hadoop's S3 connector works on any Spark platform with hadoop-aws.
+    return "s3a://" + path[len("s3://") :] if path.startswith("s3://") else path
+
+
 def _parse_path_map(param: str, value: Any) -> dict[str, list[str]]:
     """Accept ``{feature_type: path | [paths]}`` as a dict or a JSON string."""
     error = TypeError(
@@ -61,7 +66,7 @@ def _parse_path_map(param: str, value: Any) -> dict[str, list[str]]:
         paths = [paths] if isinstance(paths, str) else paths
         if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
             raise error
-        path_map[feature_type] = paths
+        path_map[feature_type] = [_s3a(p) for p in paths]
     return path_map
 
 
@@ -98,7 +103,9 @@ class RunConfig:
         missing = [f for f in _REQUIRED if f not in values]
         if missing:
             raise ValueError(f"missing required params: {missing}")
-        values["output_path"] = values["output_path"].rstrip("/")
+        values["output_path"] = _s3a(values["output_path"].rstrip("/"))
+        if "previous_metrics_path" in values:
+            values["previous_metrics_path"] = _s3a(values["previous_metrics_path"])
         for field in _BOOLS:
             if field in values:
                 values[field] = _parse_bool(values[field])

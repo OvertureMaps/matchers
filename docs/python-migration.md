@@ -440,20 +440,21 @@ Implementation details behind the design above.
 - `RunConfig` exists only in the Python process that drives the job (the Spark driver). Executors get plain values from it, never the object.
 - `RunConfig` holds the job params, with defaults filled in and values parsed into real types. Theme constants and the model stay out of it.
 - The job starts with `RunConfig.for_run(params)`, which builds `RunConfig` from the params and writes `config.json` before reading any input. If a stage has finished and the run folder's `config.json` differs, the job fails. Otherwise a rerun with changed params would skip stages that ran with the old ones. Before any stage finishes, the new `config.json` replaces the old one, so a retry that fixes a bad param (a missing `modelJar`, a wrong input path) reuses the folder. Apart from that check, nothing reads `config.json` back: a retry gets the same params from Airflow and builds the same config. Anything resolved at run time (a "latest" baseline, a timestamp) is resolved in the DAG and passed in as a param, so the job never resolves anything on its own.
+- `RunConfig` rewrites `s3://` paths to `s3a://` and drops a trailing slash from `output_path`. Hadoop's S3A connector works on any Spark platform with hadoop-aws, while raw `s3://` works only where the platform maps it, as Glue does. On Wherobots, S3A is the only client that gets the bucket's role.
 - Every stage write uses `mode("overwrite")`, so rerunning a stage without a marker replaces whatever a failed attempt left behind.
 - `run_stage` writes a stage's marker after all of the stage's outputs are written, and clears Spark's cache before the next stage. Spark's own `_SUCCESS` files mark single DataFrame writes, so they never stand in for a stage marker.
 - `config.json` lists every field, defaults included, plus the installed matcher package version, so the bundle metadata shows exactly what the run used. Once a stage has finished, a changed matcher version or model jar between attempts fails the same check as changed params. This is on purpose: after a version change, start a new run folder. Uncommitted local edits keep the same version string, so a local rerun with edited code still resumes. Example (values are placeholders):
 
   ```json
   {
-    "output_path": "s3://.../<run>/",
-    "input": {"place": ["s3://.../candidates/"]},
-    "baseline": {"place": ["s3://.../baseline/"]},
+    "output_path": "s3a://.../<run>",
+    "input": {"place": ["s3a://.../candidates/"]},
+    "baseline": {"place": ["s3a://.../baseline/"]},
     "provider": "<provider>",
     "model_jar": "<path>/places-matcher-model-<version>.jar",
     "match_history": true,
     "embeddings_cache_table": null,
-    "previous_metrics_path": "s3://.../<previous run>/metrics/",
+    "previous_metrics_path": "s3a://.../<previous run>/metrics/",
     "versions": {"overture-matchers": "<version>"}
   }
   ```

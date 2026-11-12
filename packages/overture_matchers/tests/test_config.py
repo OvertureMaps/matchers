@@ -27,6 +27,19 @@ def test_from_params_fills_defaults_and_parses_types():
     assert config.model_jar is None
     assert RunConfig.from_params(PARAMS | {"modelJar": "/m.jar"}).model_jar == "/m.jar"
     assert RunConfig.from_params(PARAMS | {"outputPath": "/r/"}).output_path == "/r"
+    s3 = RunConfig.from_params(
+        PARAMS
+        | {
+            "outputPath": "s3://b/run/",
+            "input": {"place": "s3://b/in"},
+            "previousMetricsPath": "s3://b/m",
+        }
+    )
+    assert (s3.output_path, s3.input, s3.previous_metrics_path) == (
+        "s3a://b/run",
+        {"place": ["s3a://b/in"]},
+        "s3a://b/m",
+    )
 
 
 def test_from_params_treats_empty_and_none_strings_as_unset():
