@@ -233,10 +233,13 @@ def _matching_columns(
     }
 
 
-def _prepare(
-    df: DataFrame, provider: Column, model_jar: str, extra: dict[str, Column]
+def _select_matching_columns(
+    df: DataFrame, provider: Column, model_jar: str, extra_columns: dict[str, Column]
 ) -> DataFrame:
-    columns = _matching_columns(df, provider, os.path.basename(model_jar)) | extra
+    """Project ``df`` to the matching columns plus ``extra_columns``."""
+    columns = (
+        _matching_columns(df, provider, os.path.basename(model_jar)) | extra_columns
+    )
     # One shuffle by id up front so later joins start co-partitioned.
     # Parsing is expensive, so it is projected once and every field reads that column.
     parsed = df.repartition("id").withColumn(_COMPONENTS, _parsed_components())
@@ -252,7 +255,7 @@ def prepare_candidates(df: DataFrame, provider: str, model_jar: str) -> DataFram
         model_jar: Path of the ``places-matcher-model`` jar, whose file name
             is where workers find it after ``ship_model_and_libpostal_data_to_workers``.
     """
-    return _prepare(df, F.lit(provider), model_jar, {})
+    return _select_matching_columns(df, F.lit(provider), model_jar, {})
 
 
 def baseline_provider_column(df: DataFrame, baseline_provider: str | None) -> Column:
@@ -292,7 +295,7 @@ def prepare_baseline(
         if "corpus_state" in df.columns
         else F.lit(1)
     )
-    return _prepare(df, provider, model_jar, {"active": active})
+    return _select_matching_columns(df, provider, model_jar, {"active": active})
 
 
 def add_base_ids(
