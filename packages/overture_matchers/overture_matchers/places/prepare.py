@@ -144,8 +144,12 @@ def _address_columns(components: Column) -> tuple[Column, Column]:
         )
     )
     raw_freeform = F.coalesce(freeform, F.lit(""))
-    # A street wins. A parse with a locality but no street gives "" rather than
-    # leaking the locality. Otherwise the freeform address minus its house number.
+    # Pick the first rule that applies:
+    # 1. The parser found a street: use it.
+    # 2. It found a city but no street: use "" so the city does not end up in the
+    #    address field.
+    # 3. It found a house number: use the raw address with that number removed.
+    # 4. Otherwise use the raw address as given.
     address = (
         F.when(street != "", street)
         .when(_java_trim(_component(components, "city")) != "", F.lit(""))
