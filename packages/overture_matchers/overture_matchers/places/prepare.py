@@ -2,8 +2,7 @@
 # Copyright (c) 2026 by the Overture Maps Foundation
 """Places setup steps: the columns matching reads, and the history join.
 
-Each side's columns come from one ``select``, and the output columns and types
-follow Scala's ``PlacesTransformer``. The JVM UDFs (name normalization and
+Each side's columns come from one ``select``. The JVM UDFs (name normalization and
 tokenizing) come from the ``places-matcher-model`` jar, which must be on the
 Spark classpath. Python UDFs live here, not in the job script, so that workers
 can unpickle them.
@@ -28,7 +27,7 @@ from overture_matchers.quadkey import focal_quadkey
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
 
-# Scala's blocking resolution for the signature's quadkey and the blocking keys.
+# Resolution of the signature's quadkey and the blocking keys.
 BLOCKING_RESOLUTION = 16
 LIBPOSTAL_DATA_DIR_CONF = "spark.sedona.libpostal.dataDir"
 _NORMALIZE_UDF = "normalize_text"
@@ -79,7 +78,7 @@ def ship_resources(spark: SparkSession, model_jar: str) -> None:
 
 
 def normalize_phone(number: str | None, region: str | None) -> str | None:
-    """Digits of the international format of ``number``, as Scala's ``normalizePhoneNumber``.
+    """Digits of the international format of ``number``.
 
     Args:
         number: A phone number, usually with punctuation.
@@ -92,7 +91,7 @@ def normalize_phone(number: str | None, region: str | None) -> str | None:
         return None
     with contextlib.suppress(
         phonenumbers.NumberParseException
-    ):  # Scala keeps the raw number.
+    ):  # Unparseable numbers keep their raw digits.
         number = phonenumbers.format_number(
             phonenumbers.parse(number, region),
             phonenumbers.PhoneNumberFormat.INTERNATIONAL,
@@ -178,14 +177,14 @@ def _website_columns(df: DataFrame) -> tuple[Column, Column]:
 
 
 def _signature(*parts: Column) -> Column:
-    """Lowercased parts joined by ``@``. Null parts are skipped, as in Scala."""
+    """Lowercased parts joined by ``@``. Null parts are skipped."""
     return F.lower(F.concat_ws(_SIGNATURE_SEPARATOR, *parts))
 
 
 def _matching_columns(
     df: DataFrame, provider: Column, model_jar_name: str
 ) -> dict[str, Column]:
-    """Column expressions for one side, in Scala's column order."""
+    """Column expressions for one side."""
     country = _clean_utf8(F.col("addresses")[0]["country"])
     house_number, address = _address_columns(F.col(_COMPONENTS))
     name = F.col("names.primary")
@@ -232,7 +231,7 @@ def _prepare(
     df: DataFrame, provider: Column, model_jar: str, extra: dict[str, Column]
 ) -> DataFrame:
     columns = _matching_columns(df, provider, os.path.basename(model_jar)) | extra
-    # One shuffle by id up front, as in Scala, so later joins start co-partitioned.
+    # One shuffle by id up front so later joins start co-partitioned.
     # Parsing is expensive, so it is projected once and every field reads that column.
     parsed = df.repartition("id").withColumn(_COMPONENTS, _parsed_components())
     return parsed.select(*[c.alias(n) for n, c in columns.items()])
@@ -302,7 +301,7 @@ def add_base_ids(
 
     Returns:
         ``candidates`` plus ``base_ids``, null where nothing matched. Retired
-        baseline records count, as in Scala; ``active`` only matters later.
+        baseline records count; ``active`` only matters later.
     """
     if not match_history:
         return candidates.withColumn("base_ids", F.lit(None).cast("array<string>"))

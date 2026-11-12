@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 by the Overture Maps Foundation
-"""Web Mercator quadkeys as native Spark expressions, matching Scala's ``QuadKey``."""
+"""Web Mercator quadkeys as native Spark expressions."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def focal_quadkey(lat: Column, lng: Column, resolution: int) -> Column:
         pixel = F.least(
             F.greatest(grid * grid_size + 0.5, F.lit(0.0)), F.lit(grid_size - 1.0)
         )
-        # The pixel is non-negative, so the casts truncate like Scala's integer division.
+        # The pixel is non-negative, so the casts truncate like integer division.
         return (pixel.cast("int") / _TILE_SIZE).cast("int")
 
     x_cell, y_cell = cell(x_grid), cell(y_grid)
