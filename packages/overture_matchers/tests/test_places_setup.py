@@ -12,6 +12,7 @@ from overture_matchers.places.coreword import h3_parent
 from overture_matchers.places.job import SetupOutput, setup
 from overture_matchers.places.prepare import (
     _clean_utf8,
+    _signature,
     add_base_ids,
     normalize_phone,
     prepare_baseline,
@@ -20,14 +21,23 @@ from overture_matchers.places.prepare import (
 from overture_matchers.quadkey import focal_quadkey
 from overture_matchers.sketches import BloomFilter
 
-POINTS = [(0.0, 0.0), (40.7128, -74.006), (-33.8688, 151.2093), (51.5, -0.12)]
+POINTS = [
+    (0.0, 0.0),
+    (40.7128, -74.006),
+    (-33.8688, 151.2093),
+    (51.5, -0.12),
+    (85.0, 179.999),
+    (-85.0, -179.999),
+    (89.9, 0.0),
+]
 
 
 def _reference_quadkey(lat, lng, zoom):
     n = 2**zoom
     x = int((lng + 180) / 360 * n)
-    sin = math.sin(math.radians(lat))
+    sin = math.sin(math.radians(max(-85.05112878, min(85.05112878, lat))))
     y = int((0.5 - math.log((1 + sin) / (1 - sin)) / (4 * math.pi)) * n)
+    x, y = min(max(x, 0), n - 1), min(max(y, 0), n - 1)
     return "".join(
         str((x >> b & 1) + 2 * (y >> b & 1)) for b in range(zoom - 1, -1, -1)
     )
@@ -174,3 +184,20 @@ def test_clean_utf8_replaces_invalid_bytes(spark):
         _clean_utf8(F.unhex(F.lit("41FF42")).cast("binary").cast("string")).alias("s")
     )
     assert df.first().s == "A\ufffdB"
+
+
+def test_signature_joins_lowercased_non_null_parts(spark):
+    row = (
+        spark.range(1)
+        .select(
+            _signature(
+                F.lit("Src"),
+                F.lit("0123"),
+                F.lit(None),
+                F.lit("Main St"),
+                F.lit("Cafe"),
+            ).alias("s")
+        )
+        .first()
+    )
+    assert row.s == "src@0123@main st@cafe"
