@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from pyspark.sql import SparkSession
 
 FEATURE_TYPE = "place"
-# Scala's GraphFrames build. Its jar also carries the Python API.
+# GraphFrames build. Its jar also carries the Python API.
 PACKAGES = ("graphframes:graphframes:0.8.3-spark3.4-s_2.12",)
 
 
