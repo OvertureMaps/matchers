@@ -18,7 +18,10 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
 ]
 # AWS Glue provides Spark and Sedona at runtime, so both stay dev dependencies.
-dependencies = ["overture-spark>=1.0.0"]
+dependencies = [
+    "overture-spark>=1.0.0",
+    "phonenumbers>=9.0.43",
+]
 
 [project.urls]
 Homepage = "https://github.com/OvertureMaps/matchers"
@@ -51,6 +54,10 @@ local_scheme = "no-local-version"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "normalizer: needs the places-matcher-model jar (PLACES_MATCHER_MODEL_JAR)",
+    "libpostal: needs the libpostal v1.0.0 data (LIBPOSTAL_DATA_DIR)",
+]
 
 [tool.ruff]
 extend = "../../pyproject.toml"
