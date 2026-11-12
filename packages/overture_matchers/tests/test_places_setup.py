@@ -10,7 +10,7 @@ from pyspark.sql import functions as F
 from overture_matchers.core.stages import RawInputs
 from overture_matchers.places.coreword import h3_parent
 from overture_matchers.places.job import SetupOutput, setup
-from overture_matchers.places.prepare import normalize_phone
+from overture_matchers.places.prepare import normalize_phone, prepare_baseline
 from overture_matchers.quadkey import focal_quadkey
 from overture_matchers.sketches import BloomFilter
 
@@ -126,3 +126,11 @@ def test_setup_columns_and_history(spark, model_jar):
     assert out.baseline.first().active == 0
     no_history = setup(RawInputs(df, baseline), "acme", model_jar, match_history=False)
     assert no_history.candidates.where("base_ids is not null").count() == 0
+
+
+def test_baseline_provider_rules(spark):
+    plain = spark.createDataFrame([("b1",)], "id string")
+    with_provider = plain.withColumn("provider", F.lit("acme"))
+    for df, given in ((plain, None), (with_provider, "other")):
+        with pytest.raises(ValueError, match="baselineProvider"):
+            prepare_baseline(df, "model.jar", given)
