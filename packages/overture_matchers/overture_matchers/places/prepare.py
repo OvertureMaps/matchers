@@ -62,7 +62,10 @@ def ship_resources(spark: SparkSession, model_jar: str) -> None:
     Raises:
         ValueError: The libpostal data dir is not set. Sedona's default
             model would change addresses outside the US.
+        FileNotFoundError: A local ``model_jar`` does not exist.
     """
+    if "://" not in model_jar and not os.path.isfile(model_jar):
+        raise FileNotFoundError(model_jar)
     data_dir = spark.conf.get(LIBPOSTAL_DATA_DIR_CONF, None)
     if not data_dir:
         raise ValueError(f"set {LIBPOSTAL_DATA_DIR_CONF} to the libpostal v1.0.0 data")
@@ -213,6 +216,22 @@ def prepare_candidates(df: DataFrame, provider: str, model_jar: str) -> DataFram
     return _prepare(df, F.lit(provider), model_jar, {})
 
 
+def baseline_provider_column(df: DataFrame, baseline_provider: str | None) -> Column:
+    """The baseline's provider: its ``provider`` column, or ``baseline_provider`` as a literal.
+
+    Raises:
+        ValueError: The baseline has a ``provider`` column and
+            ``baseline_provider`` is set, or has neither.
+    """
+    has_provider = "provider" in df.columns
+    if has_provider == (baseline_provider is not None):
+        raise ValueError(
+            "set baselineProvider when the baseline has no provider column, "
+            "and only then"
+        )
+    return F.col("provider") if has_provider else F.lit(baseline_provider)
+
+
 def prepare_baseline(
     df: DataFrame, model_jar: str, baseline_provider: str | None = None
 ) -> DataFrame:
@@ -228,13 +247,7 @@ def prepare_baseline(
         ValueError: The baseline has a ``provider`` column and
             ``baseline_provider`` is set, or has neither.
     """
-    has_provider = "provider" in df.columns
-    if has_provider == (baseline_provider is not None):
-        raise ValueError(
-            "set baselineProvider when the baseline has no provider column, "
-            "and only then"
-        )
-    provider = F.col("provider") if has_provider else F.lit(baseline_provider)
+    provider = baseline_provider_column(df, baseline_provider)
     active = (
         F.when(F.col("corpus_state") == "active", F.lit(1)).otherwise(F.lit(0))
         if "corpus_state" in df.columns

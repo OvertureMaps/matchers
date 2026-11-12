@@ -26,6 +26,7 @@ from overture_matchers.core.stages import (
 )
 from overture_matchers.places.prepare import (
     add_base_ids,
+    baseline_provider_column,
     prepare_baseline,
     prepare_candidates,
     register_text_udfs,
@@ -63,6 +64,7 @@ def setup(
         Candidates with ``base_ids``, and the baseline with ``active``.
     """
     spark = raw.candidates.sparkSession
+    baseline_provider_column(raw.baseline, baseline_provider)  # fail before shipping
     ship_resources(spark, model_jar)
     register_text_udfs(spark)
     # The baseline feeds both the history join and the stage output.
