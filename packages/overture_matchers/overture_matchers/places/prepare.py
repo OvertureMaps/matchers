@@ -53,7 +53,9 @@ def register_text_udfs(spark: SparkSession) -> None:
     )
 
 
-def ship_resources(spark: SparkSession, model_jar: str) -> None:
+def ship_model_and_libpostal_data_to_workers(
+    spark: SparkSession, model_jar: str
+) -> None:
     """Send the model jar and the libpostal data to the workers.
 
     Args:
@@ -248,7 +250,7 @@ def prepare_candidates(df: DataFrame, provider: str, model_jar: str) -> DataFram
         df: Raw candidate places.
         provider: Stamped on every row.
         model_jar: Path of the ``places-matcher-model`` jar, whose file name
-            is where workers find it after ``ship_resources``.
+            is where workers find it after ``ship_model_and_libpostal_data_to_workers``.
     """
     return _prepare(df, F.lit(provider), model_jar, {})
 

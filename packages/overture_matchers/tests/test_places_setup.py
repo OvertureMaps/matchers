@@ -18,7 +18,7 @@ from overture_matchers.places.prepare import (
     add_base_ids,
     normalize_phone,
     prepare_baseline,
-    ship_resources,
+    ship_model_and_libpostal_data_to_workers,
 )
 from overture_matchers.quadkey import focal_quadkey
 from overture_matchers.sketches import BloomFilter
@@ -161,9 +161,9 @@ def test_setup_validates_before_shipping(spark):
         setup(raw, "acme", "/no/such.jar")
 
 
-def test_ship_resources_preconditions(spark):
+def test_ship_to_workers_preconditions(spark):
     with pytest.raises(FileNotFoundError):
-        ship_resources(spark, "/no/such.jar")
+        ship_model_and_libpostal_data_to_workers(spark, "/no/such.jar")
 
 
 def test_add_base_ids(spark):
