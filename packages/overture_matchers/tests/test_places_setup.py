@@ -10,7 +10,13 @@ from pyspark.sql import functions as F
 from overture_matchers.core.stages import RawInputs
 from overture_matchers.places.coreword import h3_parent
 from overture_matchers.places.job import SetupOutput, setup
-from overture_matchers.places.prepare import normalize_phone, prepare_baseline
+from overture_matchers.places.prepare import (
+    _clean_utf8,
+    add_base_ids,
+    normalize_phone,
+    prepare_baseline,
+    ship_resources,
+)
 from overture_matchers.quadkey import focal_quadkey
 from overture_matchers.sketches import BloomFilter
 
@@ -134,3 +140,37 @@ def test_baseline_provider_rules(spark):
     for df, given in ((plain, None), (with_provider, "other")):
         with pytest.raises(ValueError, match="baselineProvider"):
             prepare_baseline(df, "model.jar", given)
+
+
+def test_setup_validates_before_shipping(spark):
+    plain = spark.createDataFrame([("b1",)], "id string")
+    raw = RawInputs(plain, plain)
+    with pytest.raises(ValueError, match="baselineProvider"):
+        setup(raw, "acme", "/no/such.jar")
+
+
+def test_ship_resources_preconditions(spark):
+    with pytest.raises(FileNotFoundError):
+        ship_resources(spark, "/no/such.jar")
+
+
+def test_add_base_ids(spark):
+    cands = spark.createDataFrame(
+        [("c1", "acme", "s1"), ("c2", "acme", "s2"), ("c3", "other", "s1")],
+        "id string, provider string, signature string",
+    )
+    base = spark.createDataFrame(
+        [("b2", "acme", "s1"), ("b1", "acme", "s1")],
+        "id string, provider string, signature string",
+    )
+    out = {r.id: r.base_ids for r in add_base_ids(cands, base, True).collect()}
+    assert out == {"c1": ["b1", "b2"], "c2": None, "c3": None}
+    off = add_base_ids(cands, base, False)
+    assert off.where("base_ids is not null").count() == 0
+
+
+def test_clean_utf8_replaces_invalid_bytes(spark):
+    df = spark.range(1).select(
+        _clean_utf8(F.unhex(F.lit("41FF42")).cast("binary").cast("string")).alias("s")
+    )
+    assert df.first().s == "A\ufffdB"
