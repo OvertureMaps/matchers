@@ -52,6 +52,9 @@ def murmur3_32(data: bytes, seed: int) -> int:
     return _signed(h1)
 
 
+_HEADER = 12
+
+
 class BloomFilter:
     """Read-only Spark ``BloomFilter`` (version 1 binary format)."""
 
@@ -67,7 +70,8 @@ class BloomFilter:
         version, self._num_hashes, num_words = struct.unpack_from(">iii", data)
         if version != 1:
             raise ValueError(f"unsupported BloomFilter version {version}")
-        self._words = struct.unpack_from(f">{num_words}Q", data, 12)
+        self._data = data
+        # The bitset stays packed. Unpacking it into Python ints costs about 5x the memory.
         self._bit_size = num_words * 64
 
     def might_contain_string(self, value: str) -> bool:
@@ -80,6 +84,7 @@ class BloomFilter:
             if combined < 0:
                 combined = ~combined
             index = combined % self._bit_size
-            if not (self._words[index >> 6] >> (index & 63)) & 1:
+            (word,) = struct.unpack_from(">Q", self._data, _HEADER + 8 * (index >> 6))
+            if not (word >> (index & 63)) & 1:
                 return False
         return True

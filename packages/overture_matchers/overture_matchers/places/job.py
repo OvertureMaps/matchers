@@ -67,10 +67,10 @@ def setup(
     baseline_provider_column(raw.baseline, baseline_provider)  # fail before shipping
     ship_resources(spark, model_jar)
     register_text_udfs(spark)
-    # The baseline feeds both the history join and the stage output.
-    baseline = prepare_baseline(raw.baseline, model_jar, baseline_provider).persist(
-        StorageLevel.MEMORY_AND_DISK
-    )
+    baseline = prepare_baseline(raw.baseline, model_jar, baseline_provider)
+    if match_history:
+        # The baseline feeds both the history join and the stage output.
+        baseline = baseline.persist(StorageLevel.MEMORY_AND_DISK)
     candidates = add_base_ids(
         prepare_candidates(raw.candidates, provider, model_jar),
         baseline,
