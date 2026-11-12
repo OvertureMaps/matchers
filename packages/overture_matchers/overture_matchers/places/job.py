@@ -41,7 +41,11 @@ PACKAGES = ("graphframes:graphframes:0.8.3-spark3.4-s_2.12",)
 
 
 def setup(
-    raw: RawInputs, provider: str, model_jar: str, match_history: bool = True
+    raw: RawInputs,
+    provider: str,
+    model_jar: str,
+    baseline_provider: str | None = None,
+    match_history: bool = True,
 ) -> SetupOutput:
     """Normalize candidates and baseline, and attach history matches if asked.
 
@@ -50,6 +54,8 @@ def setup(
         provider: Stamped on every candidate.
         model_jar: Path of the ``places-matcher-model`` jar. Its classes must
             be on the Spark classpath.
+        baseline_provider: Provider for a baseline without a ``provider``
+            column.
         match_history: Whether to fill ``base_ids`` from the baseline. Only
             setup reads this flag.
 
@@ -60,7 +66,7 @@ def setup(
     ship_resources(spark, model_jar)
     register_text_udfs(spark)
     # The baseline feeds both the history join and the stage output.
-    baseline = prepare_baseline(raw.baseline, model_jar).persist(
+    baseline = prepare_baseline(raw.baseline, model_jar, baseline_provider).persist(
         StorageLevel.MEMORY_AND_DISK
     )
     candidates = add_base_ids(
@@ -116,6 +122,7 @@ def run(spark: SparkSession, config: RunConfig) -> None:
         raw,
         provider=config.provider,
         model_jar=config.model_jar,
+        baseline_provider=config.baseline_provider,
         match_history=config.match_history,
     )
     matched = run_stage(

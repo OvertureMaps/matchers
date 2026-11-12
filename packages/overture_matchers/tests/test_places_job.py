@@ -42,7 +42,9 @@ def params(spark, tmp_path):
 
 @pytest.fixture
 def fake_setup(spark, monkeypatch):
-    def setup(raw, provider, model_jar, match_history=True) -> SetupOutput:
+    def setup(
+        raw, provider, model_jar, baseline_provider=None, match_history=True
+    ) -> SetupOutput:
         return SetupOutput(spark.range(1), spark.range(1))
 
     monkeypatch.setattr(job, "setup", setup)
@@ -76,7 +78,9 @@ def test_run_rejects_a_missing_model_jar(spark, params):
 def test_run_chains_stage_outputs_and_skips_on_rerun(spark, params, monkeypatch):
     calls = {}
 
-    def setup(raw, provider, model_jar, match_history=True) -> SetupOutput:
+    def setup(
+        raw, provider, model_jar, baseline_provider=None, match_history=True
+    ) -> SetupOutput:
         calls["setup"] = (raw.candidates.count(), match_history)
         return SetupOutput(spark.range(3), spark.range(4))
 

@@ -213,24 +213,34 @@ def prepare_candidates(df: DataFrame, provider: str, model_jar: str) -> DataFram
     return _prepare(df, F.lit(provider), model_jar, {})
 
 
-def prepare_baseline(df: DataFrame, model_jar: str) -> DataFrame:
+def prepare_baseline(
+    df: DataFrame, model_jar: str, baseline_provider: str | None = None
+) -> DataFrame:
     """Baseline with the columns matching reads, plus ``active``.
 
     Args:
-        df: Raw baseline places. It needs a ``provider`` column.
+        df: Raw baseline places.
         model_jar: Path of the ``places-matcher-model`` jar.
+        baseline_provider: Provider to stamp when the baseline has no
+            ``provider`` column.
 
     Raises:
-        ValueError: The baseline has no ``provider`` column.
+        ValueError: The baseline has a ``provider`` column and
+            ``baseline_provider`` is set, or has neither.
     """
-    if "provider" not in df.columns:
-        raise ValueError("the baseline has no provider column")
+    has_provider = "provider" in df.columns
+    if has_provider == (baseline_provider is not None):
+        raise ValueError(
+            "set baselineProvider when the baseline has no provider column, "
+            "and only then"
+        )
+    provider = F.col("provider") if has_provider else F.lit(baseline_provider)
     active = (
         F.when(F.col("corpus_state") == "active", F.lit(1)).otherwise(F.lit(0))
         if "corpus_state" in df.columns
         else F.lit(1)
     )
-    return _prepare(df, F.col("provider"), model_jar, {"active": active})
+    return _prepare(df, provider, model_jar, {"active": active})
 
 
 def add_base_ids(
