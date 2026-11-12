@@ -53,7 +53,7 @@ local_scheme = "no-local-version"
 testpaths = ["tests"]
 
 [tool.ruff]
-extend = "../../ruff.toml"
+extend = "../../pyproject.toml"
 
 [tool.semantic_release]
 commit_parser = "conventional-monorepo"
@@ -62,7 +62,7 @@ allow_zero_version = true
 
 # Paths are relative to this directory, because the release job runs here.
 # Only shipped files count, so test-only changes and uv.lock bumps do not
-# release. See PACKAGE_VERSIONING.md.
+# release. See docs/PACKAGE_VERSIONING.md.
 [tool.semantic_release.commit_parser_options]
 path_filters = ["overture_matchers", "pyproject.toml", "README.md", "LICENSE"]
 # This floors every recognized type (docs, style, refactor, chore, build, ci, test
