@@ -30,7 +30,7 @@ from overture_matchers.places.prepare import (
     prepare_baseline,
     prepare_candidates,
     register_text_udfs,
-    ship_resources,
+    ship_model_and_libpostal_data_to_workers,
 )
 
 if TYPE_CHECKING:
@@ -65,7 +65,7 @@ def setup(
     """
     spark = raw.candidates.sparkSession
     baseline_provider_column(raw.baseline, baseline_provider)  # fail before shipping
-    ship_resources(spark, model_jar)
+    ship_model_and_libpostal_data_to_workers(spark, model_jar)
     register_text_udfs(spark)
     baseline = prepare_baseline(raw.baseline, model_jar, baseline_provider)
     if match_history:
