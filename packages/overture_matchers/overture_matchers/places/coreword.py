@@ -30,7 +30,10 @@ _UINT64 = (1 << 64) - 1
 
 
 def h3_parent(cell: int, resolution: int) -> int:
-    """H3 parent of ``cell`` at a coarser ``resolution``."""
+    """H3 parent of ``cell`` at a coarser ``resolution``.
+
+    Bit arithmetic keeps workers free of an H3 library.
+    """
     unused_digits = (1 << (_H3_MAX_RES - resolution) * _H3_DIGIT_BITS) - 1
     parent = cell & ~(0xF << _H3_RES_SHIFT) & ~unused_digits
     return parent | (resolution << _H3_RES_SHIFT) | unused_digits

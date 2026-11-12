@@ -16,6 +16,9 @@ LIBPOSTAL_DATA = os.environ.get("LIBPOSTAL_DATA_DIR")
 
 
 def pytest_collection_modifyitems(items):
+    # Set REQUIRE_PRIVATE_INPUTS where the inputs exist, so a missing one fails.
+    if os.environ.get("REQUIRE_PRIVATE_INPUTS"):
+        return
     skips = {
         "normalizer": (MODEL_JAR, "set PLACES_MATCHER_MODEL_JAR"),
         "libpostal": (LIBPOSTAL_DATA, "set LIBPOSTAL_DATA_DIR"),

@@ -33,6 +33,8 @@ BLOCKING_RESOLUTION = 16
 LIBPOSTAL_DATA_DIR_CONF = "spark.sedona.libpostal.dataDir"
 _NORMALIZE_UDF = "normalize_text"
 _TOKENIZE_UDF = "tokenize_text"
+_SIGNATURE_SEPARATOR = "@"
+_ACTIVE_STATE = "active"
 _NON_DIGITS = re.compile(r"[^0-9]")
 _HOST = r"^(?:[a-z][a-z0-9+.-]*://)?(?:www\.)?([^/:?#]+)"
 _HOST_AND_PATH = r"^(?:[a-z][a-z0-9+.-]*://)?(?:www\.)?([^?#]+)"
@@ -71,7 +73,7 @@ def ship_resources(spark: SparkSession, model_jar: str) -> None:
         raise ValueError(f"set {LIBPOSTAL_DATA_DIR_CONF} to the libpostal v1.0.0 data")
     spark.sparkContext.addFile(model_jar)
     # Sedona reads a local data dir in place. Only remote data needs shipping.
-    if "://" in data_dir:
+    if "://" in data_dir and not data_dir.startswith("file:"):
         spark.sparkContext.addFile(data_dir, recursive=True)
 
 
@@ -87,7 +89,9 @@ def normalize_phone(number: str | None, region: str | None) -> str | None:
     """
     if number is None:
         return None
-    with contextlib.suppress(Exception):  # Scala keeps the raw number on any failure.
+    with contextlib.suppress(
+        phonenumbers.NumberParseException
+    ):  # Scala keeps the raw number.
         number = phonenumbers.format_number(
             phonenumbers.parse(number, region),
             phonenumbers.PhoneNumberFormat.INTERNATIONAL,
@@ -109,7 +113,9 @@ def _source(sources: Column) -> Column:
     primary = F.filter(
         sources, lambda s: s["property"].isNull() | (s["property"] == "")
     )[0]
-    return F.coalesce(F.lower(F.split(primary["record_id"], "@")[0]), F.lit(""))
+    return F.coalesce(
+        F.lower(F.split(primary["record_id"], _SIGNATURE_SEPARATOR)[0]), F.lit("")
+    )
 
 
 def _component(components: Column, label: str) -> Column:
@@ -117,14 +123,11 @@ def _component(components: Column, label: str) -> Column:
     return F.coalesce(first["value"], F.lit(""))
 
 
-def _matching_columns(
-    df: DataFrame, provider: Column, model_jar_name: str
-) -> dict[str, Column]:
-    """Column expressions for one side, in Scala's column order."""
+def _address_columns() -> tuple[Column, Column]:
+    """``house_number`` and ``address`` parsed from the first address."""
     first_address = F.col("addresses")[0]
     freeform = _clean_utf8(first_address["freeform"])
     locality = _clean_utf8(first_address["locality"])
-    country = _clean_utf8(first_address["country"])
     query = F.concat_ws(" ", freeform, locality)
     components = F.when(F.trim(query) != "", ParseAddress(query))
     house_number = _component(components, "house_number")
@@ -145,16 +148,11 @@ def _matching_columns(
         )
         .otherwise(raw_freeform)
     )
-    name = F.col("names.primary")
-    name_clean = F.call_udf(_NORMALIZE_UDF, name)
-    address_clean = F.call_udf(_NORMALIZE_UDF, address)
-    name_tokens = F.call_udf(_TOKENIZE_UDF, name_clean)
-    lat = F.expr("ST_Y(ST_GeomFromWKB(geometry))")
-    lng = F.expr("ST_X(ST_GeomFromWKB(geometry))")
-    quadkey = focal_quadkey(lat, lng, BLOCKING_RESOLUTION)
-    source = _source(F.col("sources"))
-    cell = F.expr("ST_H3CellIDs(ST_GeomFromWKB(geometry), 9, false)[0]")
-    stripped_tokens = strip_background_udf(model_jar_name, name_tokens, cell)
+    return house_number, address
+
+
+def _website_columns(df: DataFrame) -> tuple[Column, Column]:
+    """Hosts and host-plus-path URLs of ``websites``, lowercased, per website."""
     no_websites = F.array().cast("array<string>")
     websites = (
         F.coalesce(F.col("websites"), no_websites)
@@ -168,6 +166,31 @@ def _matching_columns(
             F.regexp_extract(F.lower(u), _HOST_AND_PATH, 1), "/+$", ""
         ),
     )
+    return hosts, urls
+
+
+def _signature(*parts: Column) -> Column:
+    """Lowercased parts joined by ``@``. Null parts are skipped, as in Scala."""
+    return F.lower(F.concat_ws(_SIGNATURE_SEPARATOR, *parts))
+
+
+def _matching_columns(
+    df: DataFrame, provider: Column, model_jar_name: str
+) -> dict[str, Column]:
+    """Column expressions for one side, in Scala's column order."""
+    country = _clean_utf8(F.col("addresses")[0]["country"])
+    house_number, address = _address_columns()
+    name = F.col("names.primary")
+    name_clean = F.call_udf(_NORMALIZE_UDF, name)
+    address_clean = F.call_udf(_NORMALIZE_UDF, address)
+    name_tokens = F.call_udf(_TOKENIZE_UDF, name_clean)
+    lat = F.expr("ST_Y(ST_GeomFromWKB(geometry))")
+    lng = F.expr("ST_X(ST_GeomFromWKB(geometry))")
+    quadkey = focal_quadkey(lat, lng, BLOCKING_RESOLUTION)
+    source = _source(F.col("sources"))
+    cell = F.expr("ST_H3CellIDs(ST_GeomFromWKB(geometry), 9, false)[0]")
+    stripped_tokens = strip_background_udf(model_jar_name, name_tokens, cell)
+    hosts, urls = _website_columns(df)
     return {
         "id": F.col("id"),
         "name": name,
@@ -187,8 +210,8 @@ def _matching_columns(
         ),
         "blocking_keys": F.array(quadkey),
         "primary_source": source,
-        "signature": F.lower(
-            F.concat_ws("@", source, quadkey, name, address, F.col("taxonomy.primary"))
+        "signature": _signature(
+            source, quadkey, name, address, F.col("taxonomy.primary")
         ),
         "provider": provider,
         "taxonomy_primary": F.coalesce(F.col("taxonomy.primary"), F.lit("")),
@@ -201,6 +224,7 @@ def _prepare(
     df: DataFrame, provider: Column, model_jar: str, extra: dict[str, Column]
 ) -> DataFrame:
     columns = _matching_columns(df, provider, os.path.basename(model_jar)) | extra
+    # One shuffle by id up front, as in Scala, so later joins start co-partitioned.
     return df.repartition("id").select(*[c.alias(n) for n, c in columns.items()])
 
 
@@ -249,7 +273,7 @@ def prepare_baseline(
     """
     provider = baseline_provider_column(df, baseline_provider)
     active = (
-        F.when(F.col("corpus_state") == "active", F.lit(1)).otherwise(F.lit(0))
+        F.when(F.col("corpus_state") == _ACTIVE_STATE, F.lit(1)).otherwise(F.lit(0))
         if "corpus_state" in df.columns
         else F.lit(1)
     )
@@ -267,7 +291,8 @@ def add_base_ids(
         match_history: When False, ``base_ids`` is null on every row.
 
     Returns:
-        ``candidates`` plus ``base_ids``, null where nothing matched.
+        ``candidates`` plus ``base_ids``, null where nothing matched. Retired
+        baseline records count, as in Scala; ``active`` only matters later.
     """
     if not match_history:
         return candidates.withColumn("base_ids", F.lit(None).cast("array<string>"))
