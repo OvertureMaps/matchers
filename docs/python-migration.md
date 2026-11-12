@@ -514,6 +514,7 @@ Harness layout: `parity/` sits outside `packages/`, so nothing in it ships to Py
 6. Java and Python `unidecode` tables differ. Keep `PlaceTextNormalizer` on the JVM to avoid this.
 7. Float details (division order, `log` in idf, float vs double) can flip pairs sitting exactly at a threshold. These differences are expected and get reviewed.
 8. Scala never loads the baseline's soft deletes. `JobUtils.loadInput` tries to union the `_deletes` table, but it reads `loadedData(table)` before assigning it, so the lookup throws and the `catch` returns the active data. Read the baseline like the input. Decide separately whether to add soft deletes.
+9. Boolean params: for a value it doesn't recognize, such as `"yes"`, Scala's `runtimeBooleanOverride` keeps the config's value. `RunConfig` raises instead. An argument set that Scala accepted can therefore fail here.
 
 ### tf-data-platform DAG changes
 

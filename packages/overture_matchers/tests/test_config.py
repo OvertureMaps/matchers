@@ -48,10 +48,12 @@ def test_from_params_rejects_missing_required_bad_bool_and_bad_map():
         RunConfig.from_params({k: v for k, v in PARAMS.items() if k != "provider"})
     with pytest.raises(ValueError, match="true or false"):
         RunConfig.from_params(PARAMS | {"matchHistory": "maybe"})
-    with pytest.raises(TypeError, match="feature_type: path"):
+    with pytest.raises(TypeError, match="input must be a"):
         RunConfig.from_params(PARAMS | {"input": '["s3://bucket/a/"]'})
-    with pytest.raises(TypeError, match="feature_type: path"):
+    with pytest.raises(TypeError, match="input must be a"):
         RunConfig.from_params(PARAMS | {"input": {"place": {"path": "/tmp/in"}}})
+    with pytest.raises(TypeError, match="baseline must be a"):
+        RunConfig.from_params(PARAMS | {"baseline": '{"place": '})
 
 
 def test_for_run_writes_config_json_with_versions(spark, tmp_path):
@@ -72,3 +74,14 @@ def test_for_run_rejects_changed_params_only_once_a_stage_is_done(spark, tmp_pat
         ValueError, match=r"differs in \['match_history'\]; start a new run folder"
     ):
         RunConfig.for_run(spark, params | {"matchHistory": False})
+
+
+def test_for_run_rejects_a_new_matcher_version_once_a_stage_is_done(
+    spark, tmp_path, monkeypatch
+):
+    params = PARAMS | {"outputPath": str(tmp_path)}
+    RunConfig.for_run(spark, params)
+    io.mark_stage_done(spark, str(tmp_path), "setup", "place")
+    monkeypatch.setattr("overture_matchers.core.config.version", lambda _: "99")
+    with pytest.raises(ValueError, match=r"differs in \['versions'\]"):
+        RunConfig.for_run(spark, params)

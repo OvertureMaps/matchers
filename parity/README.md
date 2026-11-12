@@ -35,6 +35,8 @@ Most candidates in a production places run are history matched, and those skip b
 
 One stage at a time: copy a Scala run's earlier stage outputs into a new run folder and mark those stages done. The Python job skips every stage with a marker in `_completed_stages/`, so it runs only the later stages.
 
+Rerunning a stage does not clear the markers of later stages. Those stages would skip and keep outputs built from the old data. When you remove a marker, also remove the markers of every stage after it.
+
 ```bash
 for f in candidates baseline embeddings; do
     aws s3 cp --recursive s3://BUCKET/parity/scala-1/$f s3://BUCKET/parity/py-1/$f

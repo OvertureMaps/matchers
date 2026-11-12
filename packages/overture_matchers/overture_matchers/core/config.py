@@ -44,11 +44,16 @@ def _parse_bool(value: Any) -> bool:
     raise ValueError(f"expected true or false, got {value!r}")
 
 
-def _parse_path_map(value: Any) -> dict[str, list[str]]:
+def _parse_path_map(param: str, value: Any) -> dict[str, list[str]]:
     """Accept ``{feature_type: path | [paths]}`` as a dict or a JSON string."""
+    error = TypeError(
+        f"{param} must be a {{feature_type: path | [paths]}} map, got {value!r}"
+    )
     if isinstance(value, str):
-        value = json.loads(value)
-    error = TypeError(f"expected a {{feature_type: path | [paths]}} map, got {value!r}")
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            raise error from None
     if not isinstance(value, dict):
         raise error
     path_map = {}
@@ -98,7 +103,7 @@ class RunConfig:
             if field in values:
                 values[field] = _parse_bool(values[field])
         for field in _PATH_MAPS:
-            values[field] = _parse_path_map(values[field])
+            values[field] = _parse_path_map(field, values[field])
         return cls(**values)
 
     def to_json(self) -> str:

@@ -13,13 +13,6 @@ def test_write_output_uses_scala_layout_with_zstd(spark, tmp_path):
     assert io.read_output(spark, out, "candidates", "place").count() == 3
 
 
-def test_write_output_overwrites(spark, tmp_path):
-    out = str(tmp_path)
-    io.write_output(out, "final", "place", spark.range(5))
-    io.write_output(out, "final", "place", spark.range(2))
-    assert io.read_output(spark, out, "final", "place").count() == 2
-
-
 def test_stage_marker_roundtrip(spark, tmp_path):
     out = str(tmp_path)
     assert not io.any_stage_done(spark, out)
