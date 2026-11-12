@@ -12,7 +12,7 @@ _TILE_SIZE = 256
 
 
 def focal_quadkey(lat: Column, lng: Column, resolution: int) -> Column:
-    """Quadkey of the tile at ``resolution`` that holds the point.
+    """Quadkey of the tile at ``resolution`` containing the given point.
 
     Args:
         lat: Latitude in degrees.
