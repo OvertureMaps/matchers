@@ -40,14 +40,25 @@ def params(spark, tmp_path):
     }
 
 
-def test_job_writes_config_then_stops_at_first_stub(spark, tmp_path, params):
+@pytest.fixture
+def fake_setup(spark, monkeypatch):
+    def setup(raw, provider, model_jar, match_history=True) -> SetupOutput:
+        return SetupOutput(spark.range(1), spark.range(1))
+
+    monkeypatch.setattr(job, "setup", setup)
+
+
+def test_job_writes_config_then_stops_at_first_stub(
+    spark, tmp_path, params, fake_setup
+):
     runner = job.PlacesMatchingJob()
     runner.spark = spark
     result = runner.run(params)
     assert isinstance(result.exception, NotImplementedError)
     assert (tmp_path / "run" / "config.json").is_file()
     assert "/run/checkpoints/" in spark.sparkContext.getCheckpointDir()
-    assert not (tmp_path / "run" / "_completed_stages").exists()
+    assert "matching" in str(result.exception)
+    assert not (tmp_path / "run" / "_completed_stages" / "matching").exists()
 
 
 def test_run_rejects_inputs_without_a_place_entry(spark, tmp_path, params):
@@ -65,7 +76,7 @@ def test_run_rejects_a_missing_model_jar(spark, params):
 def test_run_chains_stage_outputs_and_skips_on_rerun(spark, params, monkeypatch):
     calls = {}
 
-    def setup(raw, match_history=True) -> SetupOutput:
+    def setup(raw, provider, model_jar, match_history=True) -> SetupOutput:
         calls["setup"] = (raw.candidates.count(), match_history)
         return SetupOutput(spark.range(3), spark.range(4))
 
@@ -101,9 +112,9 @@ def test_run_chains_stage_outputs_and_skips_on_rerun(spark, params, monkeypatch)
     assert calls == {}
 
 
-def test_run_local_reads_params_file(spark, tmp_path, params):
+def test_run_local_reads_params_file(spark, tmp_path, params, fake_setup):
     params_file = tmp_path / "params.json"
     params_file.write_text(json.dumps(params))
-    with pytest.raises(NotImplementedError, match="setup"):
+    with pytest.raises(NotImplementedError, match="matching"):
         run_local(job.run, str(params_file), spark=spark)
     assert (tmp_path / "run" / "config.json").is_file()

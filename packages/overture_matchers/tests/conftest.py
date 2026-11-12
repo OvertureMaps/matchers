@@ -10,6 +10,26 @@ from overture_spark import SparkPlatform, getSparkSedonaSession
 
 from overture_matchers.places.job import PACKAGES
 
+# Optional private inputs. Tests that need them skip when they are unset.
+MODEL_JAR = os.environ.get("PLACES_MATCHER_MODEL_JAR")
+LIBPOSTAL_DATA = os.environ.get("LIBPOSTAL_DATA_DIR")
+
+
+def pytest_collection_modifyitems(items):
+    skips = {
+        "normalizer": (MODEL_JAR, "set PLACES_MATCHER_MODEL_JAR"),
+        "libpostal": (LIBPOSTAL_DATA, "set LIBPOSTAL_DATA_DIR"),
+    }
+    for item in items:
+        for marker, (value, reason) in skips.items():
+            if marker in item.keywords and not value:
+                item.add_marker(pytest.mark.skip(reason=reason))
+
+
+@pytest.fixture(scope="session")
+def model_jar():
+    return MODEL_JAR
+
 
 @pytest.fixture(scope="session")
 def spark():
@@ -30,6 +50,12 @@ def spark():
             "spark.ui.enabled": "false",
             # UTC keeps timestamp results independent of the machine's timezone.
             "spark.sql.session.timeZone": "UTC",
+            **({"spark.jars": MODEL_JAR} if MODEL_JAR else {}),
+            **(
+                {"spark.sedona.libpostal.dataDir": LIBPOSTAL_DATA}
+                if LIBPOSTAL_DATA
+                else {}
+            ),
         },
     )
     yield session
