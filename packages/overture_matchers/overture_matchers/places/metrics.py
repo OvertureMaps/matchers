@@ -111,9 +111,15 @@ def clusters(matches: DataFrame) -> DataFrame:
             F.lit(1)
         )
 
+    # Structs keep a null candidate ID apart from a non-candidate side.
     candidate_side = F.array(
-        F.when(F.col("record_type") == CANDIDATE, F.col("id")),
-        F.when(F.col("base_record_type") == CANDIDATE, F.col("base_id")),
+        F.struct(
+            (F.col("record_type") == CANDIDATE).alias("c"), F.col("id").alias("v")
+        ),
+        F.struct(
+            (F.col("base_record_type") == CANDIDATE).alias("c"),
+            F.col("base_id").alias("v"),
+        ),
     )
     return (
         matches.groupBy("cluster_id")
@@ -126,14 +132,16 @@ def clusters(matches: DataFrame) -> DataFrame:
             F.array_distinct(F.flatten(F.collect_list(F.array("id", "base_id")))).alias(
                 "entities"
             ),
-            F.array_distinct(F.flatten(F.collect_list(candidate_side))).alias("cands"),
+            F.flatten(F.collect_list(candidate_side)).alias("cands"),
             F.min("id").alias("first_id"),
         )
         .select(
             "cluster_id",
             "type",
             F.size("entities").alias("entity_count"),
-            F.filter("cands", lambda x: x.isNotNull()).alias("candidate_ids"),
+            F.array_distinct(
+                F.transform(F.filter("cands", lambda x: x["c"]), lambda x: x["v"])
+            ).alias("candidate_ids"),
             "first_id",
         )
         .withColumn("candidate_count", F.size("candidate_ids"))

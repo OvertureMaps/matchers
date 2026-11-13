@@ -179,3 +179,17 @@ def test_feature_stats_with_a_model_jar(spark, tmp_path):
     assert rows[("MatchFeature.f", "mean")] == 4.0
     # (4 - 1) / sqrt(2)
     assert rows[("MatchFeatureZScore", "f")] == 2.1213
+
+
+def test_clusters_keeps_a_null_candidate_id(spark):
+    matches = spark.createDataFrame(
+        [
+            ("k", None, "candidate", "b", "baseline", "match", "candidate_baseline"),
+            ("k", "b", "baseline", "c", "candidate", "match", "candidate_baseline"),
+        ],
+        "cluster_id string, id string, record_type string, base_id string, "
+        "base_record_type string, match_type string, match_sub_type string",
+    )
+    [row] = places.clusters(matches).collect()
+    assert sorted(row["candidate_ids"], key=str) == [None, "c"]
+    assert row["candidate_count"] == 2

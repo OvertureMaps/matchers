@@ -141,13 +141,25 @@ def _best_match_winners(rows: DataFrame) -> DataFrame:
     )
 
 
-def _candidate_ids(rows: DataFrame) -> DataFrame:
-    """Distinct (cluster_id, id) for candidate records on either side of a pair."""
-    left = rows.where(F.col("record_type") == CANDIDATE).select("cluster_id", "id")
-    right = rows.where(F.col("base_record_type") == CANDIDATE).select(
-        "cluster_id", F.col("base_id").alias("id")
+def _side_ids(rows: DataFrame, candidates_only: bool = True) -> DataFrame:
+    """Distinct (cluster_id, id) on either side of a pair, optionally candidates only."""
+    left, right = rows, rows
+    if candidates_only:
+        left = rows.where(F.col("record_type") == CANDIDATE)
+        right = rows.where(F.col("base_record_type") == CANDIDATE)
+    return (
+        left.select("cluster_id", "id")
+        .unionByName(right.select("cluster_id", F.col("base_id").alias("id")))
+        .distinct()
     )
-    return left.unionByName(right).distinct()
+
+
+def _join_cluster(left: DataFrame, right: DataFrame, how: str = "inner") -> DataFrame:
+    """Join on ``cluster_id``, treating a null ``cluster_id`` as one cluster."""
+    joined = left.alias("l").join(
+        right.alias("r"), F.col("l.cluster_id").eqNullSafe(F.col("r.cluster_id")), how
+    )
+    return joined.drop(F.col("r.cluster_id")) if how != "left_anti" else joined
 
 
 def select_winners(
@@ -180,22 +192,31 @@ def select_winners(
     )
     orphans = [
         r["cluster_id"]
-        for r in _candidate_ids(rows.where(F.col("_kind") == "best_match"))
-        .select("cluster_id")
-        .distinct()
-        .join(by_cluster, "cluster_id", "left_anti")
+        for r in _join_cluster(
+            _side_ids(rows.where(F.col("_kind") == "best_match"))
+            .select("cluster_id")
+            .distinct(),
+            by_cluster,
+            "left_anti",
+        )
         .limit(5)
         .collect()
     ]
     if orphans:
         raise ValueError(f"clusters without a winner, for example {orphans}")
+    # Candidate-only clusters fold in every ID, whatever its record type.
+    losers = _side_ids(
+        rows.where(F.col("_kind").isin("nomatch", "best_match"))
+    ).unionByName(
+        _side_ids(rows.where(F.col("_kind") == "candidate_only"), candidates_only=False)
+    )
     fallout = (
-        _candidate_ids(rows.where(F.col("_kind") != "baseline_only"))
-        .join(
+        _join_cluster(
+            losers,
             by_cluster.select("cluster_id", F.col("id").alias("duplicate_of")),
-            "cluster_id",
         )
-        .where(F.col("id") != F.col("duplicate_of"))
+        .where(~F.col("id").eqNullSafe(F.col("duplicate_of")))
         .select("id", "duplicate_of")
+        .distinct()
     )
     return by_cluster.select("id", "base_id"), fallout

@@ -47,6 +47,13 @@ MATCHES = [
     # a baseline ID with no candidate pair cannot win
     pair("no_candidate_pair", "q", "B-q", CB, 0.5),
     pair("no_candidate_pair", "B-r", "B-s", BB, 0.5),
+    # a null candidate ID still folds into the winner
+    pair("null_id", None, "d1", CC, 0.5),
+    pair("null_id", "d1", "d2", CC, 0.5),
+    # candidate-only clusters fold in IDs without a record type
+    ("untyped", "e1", None, "e2", None, *CC, 0.4),
+    # a null cluster_id is one cluster
+    pair(None, "m", "B-m", CB, 0.5),
 ]
 BASELINE = [("B-active", 1), ("B-deleted", 0), ("B-q", 1)]
 
@@ -70,6 +77,9 @@ def test_winners(selected):
         ("y", "B-active"),
         ("z", "B-two"),
         ("q", "B-q"),
+        ("d1", None),
+        ("e2", None),
+        ("m", "B-m"),
     }
 
 
@@ -85,7 +95,15 @@ def test_a_cluster_without_a_winner_raises(spark):
 
 def test_fallout_folds_losing_candidates_into_the_winner(selected):
     _, fallout = selected
-    assert fallout == {("c1", "c2"), ("c3", "c2"), ("x", "y"), ("w", "z")}
+    assert fallout == {
+        ("c1", "c2"),
+        ("c3", "c2"),
+        ("x", "y"),
+        ("w", "z"),
+        (None, "d1"),
+        ("d2", "d1"),
+        ("e1", "e2"),
+    }
 
 
 def test_select_winners_adds_missing_match_columns(spark):
@@ -101,23 +119,28 @@ def test_select_winners_adds_missing_match_columns(spark):
 
 @pytest.mark.parametrize("output_path", [None, "run"])
 def test_assign_ids_reuses_baseline_ids_and_mints_uuids(spark, tmp_path, output_path):
+    # "b" is in the raw candidates twice; "ghost" wins but is not a raw candidate.
     candidates = spark.createDataFrame(
-        [("a", "A"), ("b", "B"), ("c", "C")], "id string, name string"
+        [("a", "A"), ("b", "B"), ("b", "B2"), ("c", "C")], "id string, name string"
     )
     winners = spark.createDataFrame(
-        [("a", "B-1"), ("b", None)], "id string, base_id string"
+        [("a", "B-1"), ("b", None), ("ghost", None)], "id string, base_id string"
     )
     run = str(tmp_path / output_path) if output_path else None
+    if run:
+        spark.sparkContext.setCheckpointDir(str(tmp_path / "checkpoints"))
     final = assign_ids(candidates, winners, "acme", run)
     rows = {r["name"]: r for r in final.collect()}
     assert final.columns == ["id", "name", "provider"]
-    assert set(rows) == {"A", "B"}
+    assert set(rows) == {"A", "B", "B2"}
     assert rows["A"]["id"] == "B-1"
     assert len(rows["B"]["id"]) == 36
+    assert rows["B"]["id"] != rows["B2"]["id"]
     assert {r["provider"] for r in rows.values()} == {"acme"}
     if run:
-        id_map = {
-            r["id"]: r["assigned_id"]
-            for r in spark.read.parquet(f"{run}/idMap/type=place").collect()
-        }
-        assert id_map == {"a": "B-1", "b": rows["B"]["id"]}
+        id_map = sorted(
+            tuple(r) for r in spark.read.parquet(f"{run}/idMap/type=place").collect()
+        )
+        assert id_map == sorted(
+            [("a", "B-1"), ("b", rows["B"]["id"]), ("b", rows["B2"]["id"])]
+        )
