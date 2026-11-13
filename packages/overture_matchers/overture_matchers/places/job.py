@@ -64,7 +64,9 @@ def setup(
         Candidates with ``base_ids``, and the baseline with ``active``.
     """
     spark = raw.candidates.sparkSession
-    baseline_provider_column(raw.baseline, baseline_provider)  # fail before shipping
+    # This fails fast before shipping if the baseline has a `provider` column
+    # and baseline_provider is set, or if it has neither.
+    baseline_provider_column(raw.baseline, baseline_provider)
     ship_model_and_libpostal_data_to_workers(spark, model_jar)
     register_text_udfs(spark)
     baseline = prepare_baseline(raw.baseline, model_jar, baseline_provider)

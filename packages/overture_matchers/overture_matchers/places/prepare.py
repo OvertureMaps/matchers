@@ -38,7 +38,8 @@ _ACTIVE_STATE = "active"
 _NON_DIGITS = re.compile(r"[^0-9]")
 _HOST = r"^(?:[a-z][a-z0-9+.-]*://)?(?:www\.)?([^/:?#]+)"
 _HOST_AND_PATH = r"^(?:[a-z][a-z0-9+.-]*://)?(?:www\.)?([^?#]+)"
-# Java's String.trim: every character up to U+0020.
+# Java's String.trim: every character up to U+0020. The Scala setup trims with
+# String.trim, so this matches it for parity (Spark's trim only strips spaces).
 _JAVA_TRIM = r"^[\x00-\x20]+|[\x00-\x20]+$"
 
 
