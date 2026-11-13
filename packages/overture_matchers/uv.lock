@@ -268,7 +268,7 @@ requires-dist = [
     { name = "numpy", marker = "extra == 'places'" },
     { name = "overture-spark", specifier = ">=1.0.0" },
     { name = "phonenumbers", specifier = ">=9.0.43" },
-    { name = "xgboost", marker = "extra == 'places'", specifier = "==3.2.0" },
+    { name = "xgboost", marker = "extra == 'places'", specifier = ">=3.2,<4" },
 ]
 provides-extras = ["places"]
 
@@ -279,7 +279,7 @@ dev = [
     { name = "pyspark", extras = ["sql"], specifier = "==3.5.4" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-cov", specifier = ">=5.0" },
-    { name = "xgboost", specifier = "==3.2.0" },
+    { name = "xgboost", specifier = ">=3.2,<4" },
 ]
 
 [[package]]
