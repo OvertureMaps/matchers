@@ -33,6 +33,7 @@ dev = [
     "apache-sedona==1.8.1",  # The design pins Sedona 1.8.1 for the Python jobs.
     "pyspark[sql]==3.5.4",  # This is the Spark version in AWS Glue 5.0.
     "pytest>=8.0",
+    "pytest-cov>=5.0",
 ]
 
 [build-system]
@@ -58,6 +59,14 @@ markers = [
     "normalizer: needs the places-matcher-model jar (PLACES_MATCHER_MODEL_JAR)",
     "libpostal: needs the libpostal v1.0.0 data (LIBPOSTAL_DATA_DIR)",
 ]
+
+[tool.coverage.run]
+source = ["overture_matchers"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 95
+show_missing = true
 
 [tool.ruff]
 extend = "../../pyproject.toml"

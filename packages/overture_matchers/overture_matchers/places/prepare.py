@@ -2,36 +2,29 @@
 # Copyright (c) 2026 by the Overture Maps Foundation
 """Places setup steps: the columns matching reads, and the history join.
 
-Each side's columns come from one ``select``. The JVM UDFs (name normalization and
-tokenizing) come from the ``places-matcher-model`` jar, which must be on the
-Spark classpath. Python UDFs live here, not in the job script, so that workers
-can unpickle them.
+Each side's columns come from one ``select``. Name normalization, tokenizing
+and background-token stripping come in as ``TextFns``, so the matching rules
+here run without the ``places-matcher-model`` jar. Python UDFs live here, not
+in the job script, so that workers can unpickle them.
 """
 
 from __future__ import annotations
 
 import contextlib
-import os
 import re
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import NamedTuple
 
 import phonenumbers
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
-from pyspark.sql.types import ArrayType, StringType
+from pyspark.sql.types import StringType
 from sedona.spark.sql.st_functions import ParseAddress
 
-from overture_matchers.places.background_tokens import strip_background_tokens_udf
 from overture_matchers.quadkey import focal_quadkey
-
-if TYPE_CHECKING:
-    from pyspark.sql import SparkSession
 
 # Resolution of the signature's quadkey and the blocking keys.
 BLOCKING_RESOLUTION = 16
-LIBPOSTAL_DATA_DIR_CONF = "spark.sedona.libpostal.dataDir"
-_NORMALIZE_UDF = "normalize_text"
-_TOKENIZE_UDF = "tokenize_text"
 _COMPONENTS = "_components"
 _SIGNATURE_SEPARATOR = "@"
 _ACTIVE_STATE = "active"
@@ -43,41 +36,13 @@ _HOST_AND_PATH = r"^(?:[a-z][a-z0-9+.-]*://)?(?:www\.)?([^?#]+)"
 _JAVA_TRIM = r"^[\x00-\x20]+|[\x00-\x20]+$"
 
 
-def register_text_udfs(spark: SparkSession) -> None:
-    """Register ``PlaceTextNormalizer`` as the JVM UDFs ``normalize_text`` and ``tokenize_text``."""
-    udfs = "org.overturemaps.places.text"
-    spark.udf.registerJavaFunction(
-        _NORMALIZE_UDF, f"{udfs}.NormalizeTextUdf", StringType()
-    )
-    spark.udf.registerJavaFunction(
-        _TOKENIZE_UDF, f"{udfs}.TokenizeTextUdf", ArrayType(StringType(), False)
-    )
+class TextFns(NamedTuple):
+    """The text functions the matching columns use, each over Columns."""
 
-
-def ship_model_and_libpostal_data_to_workers(
-    spark: SparkSession, model_jar: str
-) -> None:
-    """Send the model jar and the libpostal data to the workers.
-
-    Args:
-        spark: The session. ``spark.sedona.libpostal.dataDir`` must name the
-            unpacked v1.0.0 libpostal data.
-        model_jar: Path of the ``places-matcher-model`` jar.
-
-    Raises:
-        ValueError: The libpostal data dir is not set. Sedona's default
-            model would change addresses outside the US.
-        FileNotFoundError: A local ``model_jar`` does not exist.
-    """
-    if "://" not in model_jar and not os.path.isfile(model_jar):
-        raise FileNotFoundError(model_jar)
-    data_dir = spark.conf.get(LIBPOSTAL_DATA_DIR_CONF, None)
-    if not data_dir:
-        raise ValueError(f"set {LIBPOSTAL_DATA_DIR_CONF} to the libpostal v1.0.0 data")
-    spark.sparkContext.addFile(model_jar)
-    # Local data dirs work as-is; only remote data needs shipping.
-    if "://" in data_dir and not data_dir.startswith("file:"):
-        spark.sparkContext.addFile(data_dir, recursive=True)
+    normalize: Callable[[Column], Column]
+    tokenize: Callable[[Column], Column]
+    # Takes the name tokens and the H3 resolution 9 cell.
+    strip_background: Callable[[Column, Column], Column]
 
 
 def normalize_phone(number: str | None, region: str | None) -> str | None:
@@ -137,9 +102,8 @@ def _parsed_components() -> Column:
     return F.when(F.trim(query) != "", ParseAddress(query))
 
 
-def _address_columns(components: Column) -> tuple[Column, Column]:
-    """``house_number`` and ``address`` from the first address and its parsed ``components``."""
-    freeform = _freeform()
+def _address_columns(freeform: Column, components: Column) -> tuple[Column, Column]:
+    """``house_number`` and ``address`` from a ``freeform`` address and its parsed ``components``."""
     house_number = _component(components, "house_number")
     street = _java_trim(
         F.regexp_replace(
@@ -189,21 +153,21 @@ def _signature(*parts: Column) -> Column:
 
 
 def _matching_columns(
-    df: DataFrame, provider: Column, model_jar_name: str
+    df: DataFrame, provider: Column, text: TextFns
 ) -> dict[str, Column]:
-    """Column expressions for one side."""
+    """Column expressions for one side. ``df`` must carry the parsed ``_COMPONENTS``."""
     country = _clean_utf8(F.col("addresses")[0]["country"])
-    house_number, address = _address_columns(F.col(_COMPONENTS))
+    house_number, address = _address_columns(_freeform(), F.col(_COMPONENTS))
     name = F.col("names.primary")
-    name_clean = F.call_udf(_NORMALIZE_UDF, name)
-    address_clean = F.call_udf(_NORMALIZE_UDF, address)
-    name_tokens = F.call_udf(_TOKENIZE_UDF, name_clean)
+    name_clean = text.normalize(name)
+    address_clean = text.normalize(address)
+    name_tokens = text.tokenize(name_clean)
     lat = F.expr("ST_Y(ST_GeomFromWKB(geometry))")
     lng = F.expr("ST_X(ST_GeomFromWKB(geometry))")
     quadkey = focal_quadkey(lat, lng, BLOCKING_RESOLUTION)
     source = _source(F.col("sources"))
     cell = F.expr("ST_H3CellIDs(ST_GeomFromWKB(geometry), 9, false)[0]")
-    stripped_tokens = strip_background_tokens_udf(model_jar_name, name_tokens, cell)
+    stripped_tokens = text.strip_background(name_tokens, cell)
     hosts, urls = _website_columns(df)
     return {
         "id": F.col("id"),
@@ -214,7 +178,7 @@ def _matching_columns(
         "name_clean_stripped": F.concat_ws(" ", stripped_tokens),
         "name_clean_stripped_tokens": stripped_tokens,
         "address_clean": address_clean,
-        "address_clean_tokens": F.call_udf(_TOKENIZE_UDF, address_clean),
+        "address_clean_tokens": text.tokenize(address_clean),
         "latitude": lat,
         "longitude": lng,
         "house_number": house_number,
@@ -235,28 +199,25 @@ def _matching_columns(
 
 
 def _select_matching_columns(
-    df: DataFrame, provider: Column, model_jar: str, extra_columns: dict[str, Column]
+    df: DataFrame, provider: Column, text: TextFns, extra_columns: dict[str, Column]
 ) -> DataFrame:
     """Project ``df`` to the matching columns plus ``extra_columns``."""
-    columns = (
-        _matching_columns(df, provider, os.path.basename(model_jar)) | extra_columns
-    )
-    # One shuffle by id up front so later joins start co-partitioned.
+    columns = _matching_columns(df, provider, text) | extra_columns
     # Parsing is expensive, so it is projected once and every field reads that column.
-    parsed = df.repartition("id").withColumn(_COMPONENTS, _parsed_components())
+    parsed = df.withColumn(_COMPONENTS, _parsed_components())
     return parsed.select(*[c.alias(n) for n, c in columns.items()])
 
 
-def prepare_candidates(df: DataFrame, provider: str, model_jar: str) -> DataFrame:
+def prepare_candidates(df: DataFrame, provider: str, text: TextFns) -> DataFrame:
     """Candidates with the columns matching reads, before ``base_ids``.
 
     Args:
         df: Raw candidate places.
         provider: Stamped on every row.
-        model_jar: Path of the ``places-matcher-model`` jar, whose file name
-            is where workers find it after ``ship_model_and_libpostal_data_to_workers``.
+        text: The text functions.
     """
-    return _select_matching_columns(df, F.lit(provider), model_jar, {})
+    # One shuffle by id up front so later joins start co-partitioned.
+    return _select_matching_columns(df.repartition("id"), F.lit(provider), text, {})
 
 
 def baseline_provider_column(df: DataFrame, baseline_provider: str | None) -> Column:
@@ -275,28 +236,22 @@ def baseline_provider_column(df: DataFrame, baseline_provider: str | None) -> Co
     return F.col("provider") if has_provider else F.lit(baseline_provider)
 
 
-def prepare_baseline(
-    df: DataFrame, model_jar: str, baseline_provider: str | None = None
-) -> DataFrame:
+def prepare_baseline(df: DataFrame, provider: Column, text: TextFns) -> DataFrame:
     """Baseline with the columns matching reads, plus ``active``.
 
     Args:
         df: Raw baseline places.
-        model_jar: Path of the ``places-matcher-model`` jar.
-        baseline_provider: Provider to stamp when the baseline has no
-            ``provider`` column.
-
-    Raises:
-        ValueError: The baseline has a ``provider`` column and
-            ``baseline_provider`` is set, or has neither.
+        provider: The baseline's provider, from ``baseline_provider_column``.
+        text: The text functions.
     """
-    provider = baseline_provider_column(df, baseline_provider)
     active = (
         F.when(F.col("corpus_state") == _ACTIVE_STATE, F.lit(1)).otherwise(F.lit(0))
         if "corpus_state" in df.columns
         else F.lit(1)
     )
-    return _select_matching_columns(df, provider, model_jar, {"active": active})
+    return _select_matching_columns(
+        df.repartition("id"), provider, text, {"active": active}
+    )
 
 
 def add_base_ids(
