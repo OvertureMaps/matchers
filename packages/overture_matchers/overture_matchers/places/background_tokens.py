@@ -49,7 +49,7 @@ def _load_filter(jar_name: str) -> BloomFilter:
         return BloomFilter(jar.read(FILTER_RESOURCE))
 
 
-def strip_background(
+def strip_background_tokens(
     tokens: list[str] | None, h3_res9: int | None, bloom: BloomFilter
 ) -> list[str]:
     """Drop background tokens, keeping all tokens if every one is background.
@@ -78,8 +78,10 @@ def strip_background(
     return kept or tokens
 
 
-def strip_background_udf(jar_name: str, tokens: Column, h3_res9: Column) -> Column:
-    """Column of ``strip_background`` over a token array and an H3 cell column.
+def strip_background_tokens_udf(
+    jar_name: str, tokens: Column, h3_res9: Column
+) -> Column:
+    """Column of ``strip_background_tokens`` over a token array and an H3 cell column.
 
     Args:
         jar_name: File name of the model jar that ``sc.addFile`` shipped.
@@ -88,6 +90,6 @@ def strip_background_udf(jar_name: str, tokens: Column, h3_res9: Column) -> Colu
     """
 
     def strip(tokens, cell):
-        return strip_background(tokens, cell, _load_filter(jar_name))
+        return strip_background_tokens(tokens, cell, _load_filter(jar_name))
 
     return F.udf(strip, ArrayType(StringType()))(tokens, h3_res9)
