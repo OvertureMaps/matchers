@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from overture_spark.job import SparkSedonaJob
 from pyspark import StorageLevel
+from pyspark.sql import functions as F
 
 from overture_matchers import ids
 from overture_matchers.core import io
@@ -31,8 +32,10 @@ from overture_matchers.metrics import (
     build_metrics_dataframe,
     compute_metrics,
 )
+from overture_matchers.places.blocking import blocking_pairs
 from overture_matchers.places.metric_inputs import load_optional_metric_inputs
 from overture_matchers.places.metrics import METRICS
+from overture_matchers.places.model import PlacesModel
 from overture_matchers.places.prepare import (
     BLOCKING_RESOLUTION,
     add_base_ids,
@@ -45,6 +48,7 @@ from overture_matchers.places.runtime import (
     register_text_udfs,
 )
 from overture_matchers.places.selection import select_best_matches_and_fallout
+from overture_matchers.prematch import history_pairs
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -103,9 +107,27 @@ def setup(
     return SetupOutput(candidates, baseline)
 
 
-def matching(prepared: SetupOutput, output_path: str | None = None) -> MatchingOutput:
-    """Generate pairs, score them and cluster the matches."""
-    raise NotImplementedError("places matching is not ported yet")
+def matching(
+    prepared: SetupOutput, model_jar: str, output_path: str | None = None
+) -> MatchingOutput:
+    """Generate pairs, score them and cluster the matches.
+
+    Args:
+        prepared: Output of ``setup``.
+        model_jar: Path of the ``places-matcher-model`` jar.
+        output_path: Run directory that receives the ``blocking`` checkpoint.
+    """
+    model = PlacesModel.load(prepared.candidates.sparkSession, model_jar)
+    to_block = prepared.candidates.filter(F.col("base_ids").isNull()).drop("base_ids")
+    blocked = io.checkpoint(
+        blocking_pairs(to_block, prepared.baseline, model),
+        output_path,
+        "blocking",
+        FEATURE_TYPE,
+    )
+    history = history_pairs(prepared.candidates)  # consumed by scoring
+    del blocked, history
+    raise NotImplementedError("matching: scoring and clustering are not ported yet")
 
 
 def assign_ids(
@@ -183,7 +205,13 @@ def run(spark: SparkSession, config: RunConfig) -> None:
         blocking_resolution=config.blocking_resolution or BLOCKING_RESOLUTION,
     )
     matched = run_stage(
-        spark, config, FEATURE_TYPE, matching, prepared, output_path=config.output_path
+        spark,
+        config,
+        FEATURE_TYPE,
+        matching,
+        prepared,
+        model_jar=config.model_jar,
+        output_path=config.output_path,
     )
     assigned = run_stage(
         spark,
