@@ -193,3 +193,55 @@ def test_clusters_keeps_a_null_candidate_id(spark):
     [row] = places.clusters(matches).collect()
     assert sorted(row["candidate_ids"], key=str) == [None, "c"]
     assert row["candidate_count"] == 2
+
+
+def test_blocking_metrics_and_relative_match_rate(spark):
+    blocking = spark.createDataFrame(
+        [("b", "candidate", "B1", "baseline"), ("b", "candidate", "c", "candidate")],
+        "id string, record_type string, base_id string, base_record_type string",
+    )
+    inp = inputs(spark, blocking=blocking)
+    rows = by_id(places.blocking_metrics(inp))
+    assert rows[("MatchBlockingTotalCandidates", "")] == 2
+    assert rows[("MatchBlockingPassedRate", "")] == 1.0
+    assert rows[("MatchBlockingVolume", "")] == 2
+    assert rows[("MatchBlockingClusterDistribution", "mean")] == 1.5
+    assert rows[("MatchBlockingClusterDistribution", "max")] == 2
+    # The one match is a history match, so none is left for the relative rate.
+    assert by_id(places.match_rate(inp))[("MatchRateRelative", "")] == 0.0
+
+
+def test_score_distribution(spark):
+    scores = spark.createDataFrame([(0.05,), (0.5,), (1.0,)], "composite_score double")
+    rows = by_id(places.score_distribution(inputs(spark, scores=scores)))
+    assert rows[("MatchScoreDistribution", "clear_no_match")] == 1
+    assert rows[("MatchScoreDistribution", "uncertain_no_match")] == 0
+    assert rows[("MatchScoreDistributionShare", "uncertain")] == pytest.approx(100 / 3)
+    assert sum(n for (m, _), n in rows.items() if m == "MatchScoreDistribution") == 3
+    empty = scores.limit(0)
+    assert places.score_distribution(inputs(spark, scores=empty)) == []
+    assert places.score_distribution(inputs(spark)) == []
+
+
+def test_feature_stats_against_the_previous_run(spark):
+    sample = spark.createDataFrame([(3.0, 1.0), (5.0, 1.0)], "f double, g double")
+    previous = spark.createDataFrame(
+        [("MatchFeature.f", "mean", 2.0), ("MatchFeature.f", "std", 1.0)],
+        "metric_id string, sub_partition string, value double",
+    )
+    reference = spark.createDataFrame([(1.0,)], "other double")
+    rows = by_id(
+        places.feature_stats(
+            inputs(
+                spark,
+                score_sample=sample,
+                feature_order=("f", "g"),
+                previous=previous,
+                reference=reference,
+            )
+        )
+    )
+    assert rows[("MatchFeatureZScorePrevRelease", "f")] == 2.0
+    assert ("MatchFeatureZScorePrevRelease", "g") not in rows
+    assert not any(m == "MatchFeatureZScore" for m, _ in rows)
+    assert places.feature_stats(inputs(spark, score_sample=sample)) == []

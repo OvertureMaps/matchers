@@ -28,7 +28,8 @@ from overture_matchers.core.stages import (
 )
 from overture_matchers.metrics import MetricInputs, to_frame
 from overture_matchers.metrics import compute as compute_metrics
-from overture_matchers.places.metrics import METRICS, load_optional_inputs
+from overture_matchers.places.metric_inputs import load_optional_inputs
+from overture_matchers.places.metrics import METRICS
 from overture_matchers.places.prepare import (
     add_base_ids,
     baseline_provider_column,
