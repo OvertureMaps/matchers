@@ -4,12 +4,14 @@
 
 from __future__ import annotations
 
+import logging
 import random
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from pyspark.sql import functions as F
 
+from overture_matchers.core import io
 from overture_matchers.metrics import (
     SHARED_METRICS,
     Metric,
@@ -18,6 +20,7 @@ from overture_matchers.metrics import (
     percentage,
     round_half_up,
 )
+from overture_matchers.places import model_jar
 from overture_matchers.places.selection import (
     BASELINE_BASELINE,
     CANDIDATE,
@@ -27,6 +30,10 @@ from overture_matchers.places.selection import (
 
 if TYPE_CHECKING:
     from pyspark.sql import DataFrame, SparkSession
+
+    from overture_matchers.core.config import RunConfig
+
+logger = logging.getLogger(__name__)
 
 # Sampled score files stop once they add up to this many bytes.
 SAMPLE_BYTES = 200 * 1024 * 1024
@@ -486,3 +493,57 @@ PLACES_METRICS: tuple[tuple[str, Metric], ...] = (
 )
 
 METRICS = SHARED_METRICS + PLACES_METRICS
+
+
+def _try(description: str, load):
+    """The result of ``load()``, or None, with a warning, if it raises."""
+    try:
+        return load()
+    except Exception:
+        logger.exception("Skipping %s", description)
+        return None
+
+
+def _reference(spark: SparkSession, config: RunConfig) -> DataFrame | None:
+    reference = model_jar.read_reference_dataset(
+        spark, config.model_jar, config.output_path
+    )
+    if reference is None:
+        logger.warning("The model jar has no reference dataset; skipping z-scores")
+    return reference
+
+
+def load_optional_inputs(
+    spark: SparkSession, config: RunConfig, feature_type: str
+) -> dict[str, object]:
+    """Load the metric inputs that a run may lack. Anything missing is left out."""
+    scores = _try(
+        "score metrics",
+        lambda: io.read_output_if_present(
+            spark, config.output_path, "scores", feature_type
+        ),
+    )
+    found = {
+        "blocking": _try(
+            "blocking metrics",
+            lambda: io.read_output_if_present(
+                spark, config.output_path, "blocking", feature_type
+            ),
+        ),
+        "scores": scores,
+        "score_sample": None
+        if scores is None
+        else _try("feature stats", lambda: sample_score_files(spark, scores)),
+        "feature_order": _try(
+            "feature stats",
+            lambda: model_jar.read_feature_order(spark, config.model_jar),
+        ),
+        "reference": _try("reference z-scores", lambda: _reference(spark, config)),
+        "previous": _try(
+            "previous release z-scores",
+            lambda: spark.read.parquet(config.previous_metrics_path),
+        )
+        if config.previous_metrics_path
+        else None,
+    }
+    return {k: v for k, v in found.items() if v is not None}
