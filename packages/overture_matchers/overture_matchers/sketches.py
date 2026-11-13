@@ -1,17 +1,21 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 by the Overture Maps Foundation
-"""A reader for the Bloom filter stored in the model jar, usable from Python workers.
+"""Readers for the Bloom filter and count-min sketch stored in the model jar, usable from Python workers.
 
 A Bloom filter is a compact set that answers "is this item in it?" with
-occasionally wrong "yes" answers and never wrong "no" answers. Spark's JVM
-code wrote this one into the jar as a binary file, and the setup stage asks it
-which tokens are common in a given H3 cell. Python reads that file directly
-and reproduces Spark's hashing, so it gets the same answers the JVM does.
+occasionally wrong "yes" answers and never wrong "no" answers. A count-min
+sketch is a compact table of counts that never undercounts. Spark's JVM code
+wrote both into the jar as binary files. The setup stage asks the Bloom filter
+which tokens are common in a given H3 cell, and the blocking step asks the
+sketch how common a name token is. Python reads the files directly and
+reproduces Spark's hashing, so it gets the same answers the JVM does.
 """
 
 from __future__ import annotations
 
 import struct
+
+import numpy as np
 
 _MASK = 0xFFFFFFFF
 
@@ -90,3 +94,35 @@ class BloomFilter:
             if not (word >> (index & 63)) & 1:
                 return False
         return True
+
+
+class CountMinSketch:
+    """Read-only Spark ``CountMinSketch`` (version 1 binary format)."""
+
+    def __init__(self, data: bytes):
+        """Parse bytes written by ``CountMinSketch.writeTo``.
+
+        Args:
+            data: The serialized sketch.
+
+        Raises:
+            ValueError: The version is not 1.
+        """
+        version, _, self._depth, self._width = struct.unpack_from(">iqii", data)
+        if version != 1:
+            raise ValueError(f"unsupported CountMinSketch version {version}")
+        # The table stays big-endian and unconverted, so it costs no more memory than the bytes.
+        table_start = struct.calcsize(">iqii") + 8 * self._depth
+        self._table = np.frombuffer(data, dtype=">i8", offset=table_start).reshape(
+            self._depth, self._width
+        )
+
+    def estimate_count(self, value: str) -> int:
+        """Upper bound of how many times ``value`` was added."""
+        raw = value.encode("utf-8")
+        h1 = murmur3_32(raw, 0)
+        h2 = murmur3_32(raw, h1)
+        return min(
+            int(self._table[i, abs(_signed((h1 + i * h2) & _MASK)) % self._width])
+            for i in range(self._depth)
+        )

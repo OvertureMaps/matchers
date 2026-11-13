@@ -28,12 +28,20 @@ Homepage = "https://github.com/OvertureMaps/matchers"
 Source = "https://github.com/OvertureMaps/matchers/tree/main/packages/overture_matchers"
 Issues = "https://github.com/OvertureMaps/matchers/issues"
 
+[project.optional-dependencies]
+places = [
+    "numpy",
+    "xgboost==3.0.4",
+]
+
 [dependency-groups]
 dev = [
     "apache-sedona==1.8.1",  # The design pins Sedona 1.8.1 for the Python jobs.
+    "pyarrow<22",
     "pyspark[sql]==3.5.4",  # This is the Spark version in AWS Glue 5.0.
     "pytest>=8.0",
     "pytest-cov>=5.0",
+    "xgboost==3.0.4",
 ]
 
 [build-system]

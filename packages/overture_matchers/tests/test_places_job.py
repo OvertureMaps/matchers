@@ -48,7 +48,11 @@ def fake_setup(spark, monkeypatch):
     ) -> SetupOutput:
         return SetupOutput(spark.range(1), spark.range(1))
 
+    def matching(prepared, model_jar, output_path=None) -> MatchingOutput:
+        raise NotImplementedError("matching is not ported")
+
     monkeypatch.setattr(job, "setup", setup)
+    monkeypatch.setattr(job, "matching", matching)
 
 
 def test_job_writes_config_then_stops_at_first_stub(
@@ -85,7 +89,7 @@ def test_run_chains_stage_outputs_and_skips_on_rerun(spark, params, monkeypatch)
         calls["setup"] = (raw.candidates.count(), match_history)
         return SetupOutput(spark.range(3), spark.range(4))
 
-    def matching(prepared, output_path=None) -> MatchingOutput:
+    def matching(prepared, model_jar, output_path=None) -> MatchingOutput:
         calls["matching"] = (
             prepared.candidates.count(),
             prepared.baseline.count(),
