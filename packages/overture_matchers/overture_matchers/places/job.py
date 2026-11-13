@@ -29,6 +29,9 @@ from overture_matchers.places.prepare import (
     baseline_provider_column,
     prepare_baseline,
     prepare_candidates,
+)
+from overture_matchers.places.runtime import (
+    jvm_text_fns,
     register_text_udfs,
     ship_model_and_libpostal_data_to_workers,
 )
@@ -66,15 +69,16 @@ def setup(
     spark = raw.candidates.sparkSession
     # This fails fast before shipping if the baseline has a `provider` column
     # and baseline_provider is set, or if it has neither.
-    baseline_provider_column(raw.baseline, baseline_provider)
+    baseline_provider_col = baseline_provider_column(raw.baseline, baseline_provider)
     ship_model_and_libpostal_data_to_workers(spark, model_jar)
     register_text_udfs(spark)
-    baseline = prepare_baseline(raw.baseline, model_jar, baseline_provider)
+    text = jvm_text_fns(model_jar)
+    baseline = prepare_baseline(raw.baseline, baseline_provider_col, text)
     if match_history:
         # The baseline feeds both the history join and the stage output.
         baseline = baseline.persist(StorageLevel.MEMORY_AND_DISK)
     candidates = add_base_ids(
-        prepare_candidates(raw.candidates, provider, model_jar),
+        prepare_candidates(raw.candidates, provider, text),
         baseline,
         match_history,
     )
