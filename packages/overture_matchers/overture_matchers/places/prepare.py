@@ -21,7 +21,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import ArrayType, StringType
 from sedona.spark.sql.st_functions import ParseAddress
 
-from overture_matchers.places.coreword import strip_background_udf
+from overture_matchers.places.background_tokens import strip_background_udf
 from overture_matchers.quadkey import focal_quadkey
 
 if TYPE_CHECKING:
