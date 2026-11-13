@@ -9,14 +9,17 @@ from typing import TYPE_CHECKING
 from pyspark.sql import Window
 from pyspark.sql import functions as F
 
+from overture_matchers.clustering import (
+    BASELINE_BASELINE,
+    CANDIDATE_BASELINE,
+    CANDIDATE_CANDIDATE,
+    NO_MATCH,
+)
+from overture_matchers.prematch import CANDIDATE
+
 if TYPE_CHECKING:
     from pyspark.sql import DataFrame
 
-CANDIDATE = "candidate"
-NO_MATCH = "nomatch"
-BASELINE_BASELINE = "baseline_baseline"
-CANDIDATE_CANDIDATE = "candidate_candidate"
-CANDIDATE_BASELINE = "candidate_baseline"
 
 # Match columns we expect to be of string type.
 STRING_COLUMNS = (
