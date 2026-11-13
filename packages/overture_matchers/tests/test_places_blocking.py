@@ -3,7 +3,7 @@
 """Tests for history pairs and place blocking on a few rows and a tiny model.
 
 Blocking rules run with stand-in engines. The jar fixture checks the real
-engines and the stage that binds them.
+engines.
 """
 
 import io
@@ -14,16 +14,14 @@ import zipfile
 
 import numpy as np
 import pandas as pd
-import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import xgboost
+from conftest import CONFIG, DOCS, FEATURES
 from pyspark.sql import Row
 from pyspark.sql import functions as F
 
-from overture_matchers.core import io as stage_io
-from overture_matchers.core.stages import SetupOutput
-from overture_matchers.places import features, job
+from overture_matchers.places import features
 from overture_matchers.places.blocking import PAIR_COLUMNS, blocking_pairs
 from overture_matchers.places.model import (
     BLOCKING_BOOSTER_RESOURCE,
@@ -36,47 +34,6 @@ from overture_matchers.places.model import (
 )
 from overture_matchers.prematch import history_pairs
 from overture_matchers.sketches import CountMinSketch
-
-FEATURES = ["name_tfidf", "name_similarity", "geo_distance"]
-DOCS = 100
-SKETCH = {"cafe": 100, "rare": 1}
-CONFIG = {
-    "feature_order": FEATURES,
-    "prediction_threshold": 0.5,
-    "spatial_radius_m": 400.0,
-}
-
-
-@pytest.fixture(scope="module")
-def jar(spark, tmp_path_factory):
-    """A jar holding a blocking booster that keeps pairs with similar names."""
-    rng = np.random.default_rng(0)
-    x = rng.random((400, 3)) * [2.0, 1.0, 400.0]
-    y = (x[:, 1] > 0.5).astype(int)
-    booster = xgboost.train(
-        {"objective": "binary:logistic", "max_depth": 2},
-        xgboost.DMatrix(x, label=y),
-        num_boost_round=10,
-    )
-    words = spark.createDataFrame(
-        [(w,) for w, n in SKETCH.items() for _ in range(n)], ["word"]
-    )
-    sketch = words._jdf.stat().countMinSketch("word", 5, 1000, 1)
-    cms = pa.table({"cms_bytes": [bytes(sketch.toByteArray())], "num_docs": [DOCS]})
-    out = io.BytesIO()
-    pq.write_table(cms, out)
-    path = tmp_path_factory.mktemp("jar") / "tiny-model.jar"
-    with zipfile.ZipFile(path, "w") as z:
-        z.writestr(
-            "places_matcher_model/metadata/blocking_config",
-            json.dumps(CONFIG),
-        )
-        z.writestr(
-            "places_matcher_model/data/blocking_model",
-            bytes(booster.save_raw(raw_format="json")),
-        )
-        z.writestr("config/places/cms-names.parquet", out.getvalue())
-    return str(path)
 
 
 @pytest.fixture(scope="module")
@@ -222,25 +179,6 @@ def test_blocking_keeps_close_similar_pairs_in_id_order(spark):
         ("a", "c"): ("baseline", "candidate"),
         ("b", "c"): ("candidate", "candidate"),
     }
-
-
-def test_matching_writes_blocking_with_the_jar_engines(spark, jar, tmp_path):
-    candidates = frame(
-        spark,
-        [
-            record("b", "blue cafe", 0.0, 0.0),
-            record("c", "blue cafe", 0.0, 0.001),
-            record("h", "blue cafe", 0.0, 0.0002),
-        ],
-    ).withColumn(
-        "base_ids",
-        F.when(F.col("id") == "h", F.array(F.lit("a"))).cast("array<string>"),
-    )
-    baseline = frame(spark, [record("a", "red bar", 0.0, 0.0005)])
-    with pytest.raises(NotImplementedError, match="scoring"):
-        job.matching(SetupOutput(candidates, baseline), jar, str(tmp_path))
-    out = stage_io.read_output(spark, str(tmp_path), "blocking", job.FEATURE_TYPE)
-    assert {(r.id, r.base_id) for r in out.collect()} == {("b", "c")}
 
 
 def test_name_idf_weighs_rare_tokens_more(shipped):

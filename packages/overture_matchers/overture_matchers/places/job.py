@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from functools import partial
 from typing import TYPE_CHECKING
 
 from overture_spark.job import SparkSedonaJob
@@ -30,14 +31,22 @@ from overture_matchers.core.stages import (
 )
 from overture_matchers.metrics import MetricInputs, to_frame
 from overture_matchers.metrics import compute as compute_metrics
-from overture_matchers.places.blocking import SPATIAL_JOIN_CONF, blocking_pairs
+from overture_matchers.places.blocking import (
+    SPATIAL_JOIN_CONF,
+    blocking_pairs,
+    shuffle_partition_count,
+)
 from overture_matchers.places.metric_inputs import load_optional_inputs
 from overture_matchers.places.metrics import METRICS
 from overture_matchers.places.model import (
     BLOCKING_BOOSTER_RESOURCE,
+    SCORING_BOOSTER_RESOURCE,
     PlacesModel,
+    margin_and_probability_udf,
     name_idf_udf,
     predict_udf,
+    read_scoring_config,
+    scoring_lookups,
 )
 from overture_matchers.places.prepare import (
     add_base_ids,
@@ -50,6 +59,7 @@ from overture_matchers.places.runtime import (
     register_text_udfs,
     ship_model_and_libpostal_data_to_workers,
 )
+from overture_matchers.places.scoring import Scorer, score_pairs
 from overture_matchers.places.selection import select_winners
 
 if TYPE_CHECKING:
@@ -106,8 +116,26 @@ def setup(
     return SetupOutput(candidates, baseline)
 
 
+def shipped_name(model_jar: str) -> str:
+    """The name workers find ``model_jar`` under once it is shipped."""
+    return os.path.basename(model_jar.rstrip("/"))
+
+
+def jar_scorer(spark: SparkSession, model_jar: str) -> Scorer:
+    """The scoring model, with lookups and booster read from the shipped jar."""
+    jar_name = shipped_name(model_jar)
+    return Scorer.from_config(
+        read_scoring_config(spark, model_jar),
+        lookups=partial(scoring_lookups, jar_name),
+        predict=margin_and_probability_udf(jar_name, SCORING_BOOSTER_RESOURCE),
+    )
+
+
 def matching(
-    prepared: SetupOutput, model_jar: str, output_path: str | None = None
+    prepared: SetupOutput,
+    model_jar: str,
+    output_path: str | None = None,
+    embeddings_cache_table: str | None = None,
 ) -> MatchingOutput:
     """Generate pairs, score them and cluster the matches.
 
@@ -115,12 +143,15 @@ def matching(
         prepared: Output of ``setup``.
         model_jar: Path of the ``places-matcher-model`` jar. It is shipped to
             the workers here, because a resumed run skips ``setup``.
-        output_path: Run directory that receives the ``blocking`` checkpoint.
+        output_path: Run directory that receives the ``blocking`` and
+            ``scores`` checkpoints.
+        embeddings_cache_table: Table of name and taxonomy embeddings.
     """
     spark = prepared.candidates.sparkSession
     spark.sparkContext.addFile(model_jar)
     model = PlacesModel.load(spark, model_jar)
-    jar_name = os.path.basename(model_jar)
+    scorer = jar_scorer(spark, model_jar)
+    jar_name = shipped_name(model_jar)
     to_block = prepared.candidates.filter(F.col("base_ids").isNull()).drop("base_ids")
     blocked = io.checkpoint(
         blocking_pairs(
@@ -134,8 +165,17 @@ def matching(
         "blocking",
         FEATURE_TYPE,
     )
-    del blocked
-    raise NotImplementedError("matching: scoring and clustering are not ported yet")
+    embeddings = spark.table(embeddings_cache_table) if embeddings_cache_table else None
+    scores = io.checkpoint(
+        score_pairs(blocked, scorer, embeddings).repartition(
+            shuffle_partition_count(spark), F.xxhash64("id", "base_id")
+        ),
+        output_path,
+        "scores",
+        FEATURE_TYPE,
+    )
+    del scores
+    raise NotImplementedError("matching: clustering is not ported yet")
 
 
 def assign_ids(
@@ -215,6 +255,7 @@ def run(spark: SparkSession, config: RunConfig) -> None:
         prepared,
         model_jar=config.model_jar,
         output_path=config.output_path,
+        embeddings_cache_table=config.embeddings_cache_table,
     )
     assigned = run_stage(
         spark,
