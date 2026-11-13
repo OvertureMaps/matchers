@@ -365,9 +365,10 @@ def test_token_similarity_claims_each_token_once():
     assert similarity.website_path_similarity(None, ["x.com"]) == -1.0
 
 
-def test_matching_writes_blocking_and_scores_with_the_jar_engines(
+def test_matching_writes_checkpoints_and_matches_with_the_jar_engines(
     spark, scoring_jar, cache, tmp_path
 ):
+    spark.sparkContext.setCheckpointDir(str(tmp_path / "checkpoints"))
     candidates = frame(
         spark,
         [
@@ -380,13 +381,33 @@ def test_matching_writes_blocking_and_scores_with_the_jar_engines(
         F.when(F.col("id") == "h", F.array(F.lit("a"))).cast("array<string>"),
     )
     baseline = frame(spark, [record("a", "red bar", 0.0, 0.0005)])
-    with pytest.raises(NotImplementedError, match="clustering"):
-        job.matching(
-            SetupOutput(candidates, baseline), scoring_jar, str(tmp_path), CACHE
-        )
+    out = job.matching(
+        SetupOutput(candidates, baseline), scoring_jar, str(tmp_path), CACHE
+    )
     for name in ("blocking", "scores"):
-        out = stage_io.read_output(spark, str(tmp_path), name, job.FEATURE_TYPE)
-        assert {(r.id, r.base_id) for r in out.collect()} == {("b", "c")}
+        out_ = stage_io.read_output(spark, str(tmp_path), name, job.FEATURE_TYPE)
+        assert {(r.id, r.base_id) for r in out_.collect()} == {("b", "c")}
+    validated = stage_io.read_output(
+        spark, str(tmp_path), "matches_validated", job.FEATURE_TYPE
+    )
+    assert {(r.id, r.base_id) for r in validated.collect()} == {("b", "c"), ("h", "a")}
+    expected = {("b", "c", "candidate_candidate"), ("h", "a", "candidate_baseline")}
+    assert {(r.id, r.base_id, r.match_sub_type) for r in out.matches.collect()} == (
+        expected
+    )
+    quiet = tmp_path / "quiet"
+    out = job.matching(
+        SetupOutput(candidates, baseline),
+        scoring_jar,
+        str(quiet),
+        CACHE,
+        output_debug=False,
+    )
+    assert {(r.id, r.base_id, r.match_sub_type) for r in out.matches.collect()} == (
+        expected
+    )
+    assert (quiet / "scores").exists()
+    assert not (quiet / "matches_validated").exists()
 
 
 def test_margin_and_probability_match_the_booster(scoring_jar):

@@ -9,14 +9,17 @@ from typing import TYPE_CHECKING
 from pyspark.sql import Window
 from pyspark.sql import functions as F
 
+from overture_matchers.clustering import (
+    BASELINE_BASELINE,
+    CANDIDATE_BASELINE,
+    CANDIDATE_CANDIDATE,
+    NO_MATCH,
+)
+from overture_matchers.prematch import CANDIDATE
+
 if TYPE_CHECKING:
     from pyspark.sql import DataFrame
 
-CANDIDATE = "candidate"
-NOMATCH = "nomatch"
-BASELINE_BASELINE = "baseline_baseline"
-CANDIDATE_CANDIDATE = "candidate_candidate"
-CANDIDATE_BASELINE = "candidate_baseline"
 
 STRING_COLUMNS = (
     "id",
@@ -70,7 +73,7 @@ def _flag_clusters(matches: DataFrame) -> DataFrame:
         F.sum(_is("match_sub_type", CANDIDATE_CANDIDATE).cast("int")).over(w) == size
     )
     kind = (
-        F.when((size == 1) & _is("match_type", NOMATCH), "nomatch")
+        F.when((size == 1) & _is("match_type", NO_MATCH), "nomatch")
         .when(all_bb, "baseline_only")
         .when(all_cc, "candidate_only")
         .otherwise("best_match")

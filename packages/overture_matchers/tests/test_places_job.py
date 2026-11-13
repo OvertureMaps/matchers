@@ -49,9 +49,7 @@ def stub_stages(spark, monkeypatch):
     ) -> SetupOutput:
         return SetupOutput(spark.range(1), spark.range(1))
 
-    def matching(
-        prepared, model_jar, output_path=None, embeddings_cache_table=None
-    ) -> MatchingOutput:
+    def matching(prepared, model_jar, **kwargs) -> MatchingOutput:
         raise NotImplementedError("matching is not ported")
 
     monkeypatch.setattr(job, "setup", setup)
@@ -101,12 +99,17 @@ def test_run_chains_stage_outputs_and_skips_on_rerun(spark, params, monkeypatch)
         return SetupOutput(spark.range(3), spark.range(4))
 
     def matching(
-        prepared, model_jar, output_path=None, embeddings_cache_table=None
+        prepared,
+        model_jar,
+        output_path=None,
+        embeddings_cache_table=None,
+        output_debug=True,
     ) -> MatchingOutput:
         calls["matching"] = (
             prepared.candidates.count(),
             prepared.baseline.count(),
             output_path,
+            output_debug,
         )
         return MatchingOutput(spark.range(5))
 
@@ -127,12 +130,14 @@ def test_run_chains_stage_outputs_and_skips_on_rerun(spark, params, monkeypatch)
 
     for fake in (setup, matching, assign_ids, metrics, load_optional_inputs):
         monkeypatch.setattr(job, fake.__name__, fake)
-    config = job.RunConfig.from_params(params | {"matchHistory": "false"})
+    config = job.RunConfig.from_params(
+        params | {"matchHistory": "false", "outputDebug": "false"}
+    )
     job.run(spark, config)
     run = params["outputPath"]
     assert calls == {
         "setup": (2, False),
-        "matching": (3, 4, run),
+        "matching": (3, 4, run, False),
         "assign_ids": (5, config.provider, run),
         "metrics": (6, 7, {"loaded": True}),
     }

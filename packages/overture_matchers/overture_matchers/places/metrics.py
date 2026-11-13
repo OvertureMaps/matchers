@@ -9,6 +9,11 @@ from typing import TYPE_CHECKING
 
 from pyspark.sql import functions as F
 
+from overture_matchers.clustering import (
+    BASELINE_BASELINE,
+    CANDIDATE_CANDIDATE,
+    NO_MATCH,
+)
 from overture_matchers.metrics import (
     SHARED_METRICS,
     Metric,
@@ -17,12 +22,7 @@ from overture_matchers.metrics import (
     percentage,
     round_half_up,
 )
-from overture_matchers.places.selection import (
-    BASELINE_BASELINE,
-    CANDIDATE,
-    CANDIDATE_CANDIDATE,
-    NOMATCH,
-)
+from overture_matchers.prematch import CANDIDATE
 
 if TYPE_CHECKING:
     from pyspark.sql import DataFrame
@@ -121,7 +121,7 @@ def clusters(matches: DataFrame) -> DataFrame:
         .agg(
             F.when(all_of(BASELINE_BASELINE), "baseline-only")
             .when(all_of(CANDIDATE_CANDIDATE), "candidates-only")
-            .when(all_of(NOMATCH), "no-match")
+            .when(all_of(NO_MATCH), "no-match")
             .otherwise("match")
             .alias("type"),
             F.array_distinct(F.flatten(F.collect_list(F.array("id", "base_id")))).alias(
