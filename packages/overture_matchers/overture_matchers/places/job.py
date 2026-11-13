@@ -78,6 +78,8 @@ FEATURE_TYPE = "place"
 THEME = "places"
 # GraphFrames 0.8.3 built for Spark 3.5. It has no dependencies beyond Spark.
 PACKAGES = ("graphframes:graphframes:0.8.3-spark3.5-s_2.12",)
+# Session settings for the whole job, so fresh and resumed runs plan alike.
+JOB_CONF = {**SPATIAL_JOIN_CONF, **CONNECTED_COMPONENTS_CONF}
 
 
 def setup(
@@ -260,8 +262,7 @@ def run(spark: SparkSession, config: RunConfig) -> None:
         raise ValueError("places needs the modelJar param")
     # GraphFrames connected components needs a checkpoint directory.
     spark.sparkContext.setCheckpointDir(io.run_uri(config.output_path, "checkpoints"))
-    # Set once for the whole job, so fresh and resumed runs plan stages alike.
-    for key, value in {**SPATIAL_JOIN_CONF, **CONNECTED_COMPONENTS_CONF}.items():
+    for key, value in JOB_CONF.items():
         spark.conf.set(key, value)
     raw = RawInputs(
         spark.read.parquet(*config.input[FEATURE_TYPE]),

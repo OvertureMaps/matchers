@@ -15,7 +15,6 @@ from overture_matchers.core.stages import (
     SetupOutput,
 )
 from overture_matchers.places import job
-from overture_matchers.places.blocking import SPATIAL_JOIN_CONF
 
 
 def test_output_names_match_scala_postfixes_and_are_unique():
@@ -54,7 +53,7 @@ def stub_stages(spark, monkeypatch):
 
     monkeypatch.setattr(job, "setup", setup)
     monkeypatch.setattr(job, "matching", matching)
-    saved = {key: spark.conf.get(key, None) for key in SPATIAL_JOIN_CONF}
+    saved = {key: spark.conf.get(key, None) for key in job.JOB_CONF}
     yield
     for key, value in saved.items():
         if value is None:
@@ -66,13 +65,14 @@ def stub_stages(spark, monkeypatch):
 def test_job_writes_config_then_stops_at_first_stub(
     spark, tmp_path, params, stub_stages
 ):
+    spark.conf.set("spark.sql.adaptive.enabled", "true")
     runner = job.PlacesMatchingJob()
     runner.spark = spark
     result = runner.run(params)
     assert isinstance(result.exception, NotImplementedError)
     assert (tmp_path / "run" / "config.json").is_file()
     assert "/run/checkpoints/" in spark.sparkContext.getCheckpointDir()
-    assert spark.conf.get("spark.sql.adaptive.enabled") == "false"
+    assert {k: spark.conf.get(k) for k in job.JOB_CONF} == job.JOB_CONF
     assert "matching" in str(result.exception)
     assert not (tmp_path / "run" / "_completed_stages" / "matching").exists()
 
