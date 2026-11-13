@@ -1,28 +1,50 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 by the Overture Maps Foundation
-"""Tests for history pairs and place blocking on a few rows and a tiny model."""
+"""Tests for history pairs and place blocking on a few rows and a tiny model.
+
+Blocking rules run with stand-in engines. The jar fixture checks the real
+engines and the stage that binds them.
+"""
 
 import io
 import json
 import math
+import os
 import zipfile
 
 import numpy as np
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import xgboost
 from pyspark.sql import Row
+from pyspark.sql import functions as F
 
-from overture_matchers.places import features
+from overture_matchers.core import io as stage_io
+from overture_matchers.core.stages import SetupOutput
+from overture_matchers.places import features, job
 from overture_matchers.places.blocking import PAIR_COLUMNS, blocking_pairs
-from overture_matchers.places.model import PlacesModel, check_xgboost_version
+from overture_matchers.places.model import (
+    BLOCKING_BOOSTER_RESOURCE,
+    PlacesModel,
+    check_xgboost_version,
+    load_booster,
+    load_name_idf,
+    name_idf,
+    predict,
+)
 from overture_matchers.prematch import history_pairs
 from overture_matchers.sketches import CountMinSketch
 
 FEATURES = ["name_tfidf", "name_similarity", "geo_distance"]
 DOCS = 100
 SKETCH = {"cafe": 100, "rare": 1}
+CONFIG = {
+    "feature_order": FEATURES,
+    "prediction_threshold": 0.5,
+    "spatial_radius_m": 400.0,
+}
 
 
 @pytest.fixture(scope="module")
@@ -47,13 +69,7 @@ def jar(spark, tmp_path_factory):
     with zipfile.ZipFile(path, "w") as z:
         z.writestr(
             "places_matcher_model/metadata/blocking_config",
-            json.dumps(
-                {
-                    "feature_order": FEATURES,
-                    "prediction_threshold": 0.5,
-                    "spatial_radius_m": 400.0,
-                }
-            ),
+            json.dumps(CONFIG),
         )
         z.writestr(
             "places_matcher_model/data/blocking_model",
@@ -61,6 +77,23 @@ def jar(spark, tmp_path_factory):
         )
         z.writestr("config/places/cms-names.parquet", out.getvalue())
     return str(path)
+
+
+@pytest.fixture(scope="module")
+def shipped(spark, jar):
+    """File name of the jar, shipped to the workers."""
+    spark.sparkContext.addFile(jar)
+    return os.path.basename(jar)
+
+
+def unit_idf(tokens):
+    return F.map_from_entries(
+        F.transform(F.array_distinct(tokens), lambda t: F.struct(t, F.lit(1.0)))
+    )
+
+
+def name_similarity_score(columns):
+    return columns[FEATURES.index("name_similarity")]
 
 
 def record(id, name, lon=0.0, lat=0.0, **extra):
@@ -110,12 +143,18 @@ def test_count_min_sketch_matches_the_jvm_estimate(jar):
         1,
         0,
     ]
+    with pytest.raises(ValueError, match="version 2"):
+        CountMinSketch(b"\x00\x00\x00\x02" + bytes(20))
 
 
-def test_model_rejects_an_unknown_blocking_feature(spark, jar, monkeypatch):
+def test_model_rejects_an_unknown_blocking_feature(monkeypatch):
     monkeypatch.delitem(features.BLOCKING_FEATURES, "name_similarity")
     with pytest.raises(ValueError, match="name_similarity"):
-        PlacesModel.load(spark, jar)
+        PlacesModel.from_config(CONFIG)
+
+
+def test_model_reads_the_jar_config(spark, jar):
+    assert PlacesModel.load(spark, jar) == PlacesModel(tuple(FEATURES), 0.5, 400.0)
 
 
 def test_booster_from_a_newer_xgboost_is_rejected():
@@ -146,8 +185,7 @@ def test_history_pairs_explode_base_ids(spark):
     }
 
 
-def test_blocking_keeps_close_similar_pairs_in_id_order(spark, jar):
-    model = PlacesModel.load(spark, jar)
+def test_blocking_keeps_close_similar_pairs_in_id_order(spark):
     candidates = frame(
         spark,
         [
@@ -163,7 +201,13 @@ def test_blocking_keeps_close_similar_pairs_in_id_order(spark, jar):
             record("e", "zzzzzz", 0.0, 0.0),  # close, but a different name
         ],
     )
-    out = blocking_pairs(candidates, baseline, model)
+    out = blocking_pairs(
+        candidates,
+        baseline,
+        PlacesModel.from_config(CONFIG),
+        unit_idf,
+        name_similarity_score,
+    )
     assert out.columns[:3] == ["base_id", "base_provider", "base_record_type"]
     assert out.columns[-len(PAIR_COLUMNS) :] == list(PAIR_COLUMNS)
     pairs = {
@@ -176,20 +220,54 @@ def test_blocking_keeps_close_similar_pairs_in_id_order(spark, jar):
     }
 
 
-def test_name_tfidf_weighs_rare_tokens_more(spark, jar):
-    from overture_matchers.places.model import name_idf_udf
-
-    df = spark.createDataFrame(
-        [(["cafe", "rare"],), (["cafe"],), (None,)], "tokens array<string>"
+def test_matching_writes_blocking_with_the_jar_engines(spark, jar, tmp_path):
+    candidates = frame(
+        spark,
+        [
+            record("b", "blue cafe", 0.0, 0.0),
+            record("c", "blue cafe", 0.0, 0.001),
+            record("h", "blue cafe", 0.0, 0.0002),
+        ],
+    ).withColumn(
+        "base_ids",
+        F.when(F.col("id") == "h", F.array(F.lit("a"))).cast("array<string>"),
     )
-    model = PlacesModel.load(spark, jar)
-    got = [
-        r.m
-        for r in df.select(name_idf_udf(model.jar_name, df.tokens).alias("m")).collect()
+    baseline = frame(spark, [record("a", "red bar", 0.0, 0.0005)])
+    with pytest.raises(NotImplementedError, match="scoring"):
+        job.matching(SetupOutput(candidates, baseline), jar, str(tmp_path))
+    out = stage_io.read_output(spark, str(tmp_path), "blocking", job.FEATURE_TYPE)
+    assert {(r.id, r.base_id) for r in out.collect()} == {("b", "c")}
+
+
+def test_name_idf_weighs_rare_tokens_more(shipped):
+    sketch, num_docs = load_name_idf(shipped)
+    got = name_idf(sketch, num_docs, ["cafe", "rare", "cafe", None])
+    assert got == pytest.approx(
+        {"cafe": math.log(DOCS / 100) + 1, "rare": math.log(DOCS / 1) + 1}
+    )
+    assert name_idf(sketch, num_docs, None) == {}
+
+
+def test_predict_matches_the_booster(shipped):
+    booster = load_booster(shipped, BLOCKING_BOOSTER_RESOURCE)
+    columns = [
+        pd.Series([0.5, 0.0]),
+        pd.Series([1.0, float("nan")]),
+        pd.Series([10.0, 300.0]),
     ]
-    assert got[0]["rare"] == pytest.approx(math.log(DOCS / 1) + 1)
-    assert got[1]["cafe"] == pytest.approx(math.log(DOCS / 100) + 1)
-    assert got[2] == {}
+    expected = booster.inplace_predict(np.column_stack(columns).astype(np.float32))
+    assert predict(booster, columns).tolist() == pytest.approx(expected.tolist())
+
+
+@pytest.mark.parametrize("name", sorted(features.BLOCKING_FEATURES))
+def test_features_read_only_their_declared_inputs(spark, name):
+    inputs = features.FEATURE_INPUTS[name]
+    types = {features.NAME_IDF: "map<string,double>"}
+    schema = ", ".join(
+        f"{side}{c} {types.get(c, 'string')}" for c in inputs for side in ("", "base_")
+    )
+    df = spark.createDataFrame([], schema)
+    df.select(features.BLOCKING_FEATURES[name]()).collect()
 
 
 def test_pair_features(spark):

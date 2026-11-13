@@ -8,6 +8,7 @@ Run locally with ``python -m overture_matchers.places.job <params.json>``.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from typing import TYPE_CHECKING
 
@@ -29,10 +30,15 @@ from overture_matchers.core.stages import (
 )
 from overture_matchers.metrics import MetricInputs, to_frame
 from overture_matchers.metrics import compute as compute_metrics
-from overture_matchers.places.blocking import blocking_pairs
+from overture_matchers.places.blocking import SPATIAL_JOIN_CONF, blocking_pairs
 from overture_matchers.places.metric_inputs import load_optional_inputs
 from overture_matchers.places.metrics import METRICS
-from overture_matchers.places.model import PlacesModel
+from overture_matchers.places.model import (
+    BLOCKING_BOOSTER_RESOURCE,
+    PlacesModel,
+    name_idf_udf,
+    predict_udf,
+)
 from overture_matchers.places.prepare import (
     add_base_ids,
     baseline_provider_column,
@@ -108,13 +114,25 @@ def matching(
 
     Args:
         prepared: Output of ``setup``.
-        model_jar: Path of the ``places-matcher-model`` jar.
+        model_jar: Path of the ``places-matcher-model`` jar. It is shipped to
+            the workers here, because a resumed run skips ``setup``.
         output_path: Run directory that receives the ``blocking`` checkpoint.
     """
-    model = PlacesModel.load(prepared.candidates.sparkSession, model_jar)
+    spark = prepared.candidates.sparkSession
+    spark.sparkContext.addFile(model_jar)
+    for key, value in SPATIAL_JOIN_CONF.items():
+        spark.conf.set(key, value)
+    model = PlacesModel.load(spark, model_jar)
+    jar_name = os.path.basename(model_jar.rstrip("/"))
     to_block = prepared.candidates.filter(F.col("base_ids").isNull()).drop("base_ids")
     blocked = io.checkpoint(
-        blocking_pairs(to_block, prepared.baseline, model),
+        blocking_pairs(
+            to_block,
+            prepared.baseline,
+            model,
+            name_idf_udf(jar_name),
+            predict_udf(jar_name, BLOCKING_BOOSTER_RESOURCE),
+        ),
         output_path,
         "blocking",
         FEATURE_TYPE,

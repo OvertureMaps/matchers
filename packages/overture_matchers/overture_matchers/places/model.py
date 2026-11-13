@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 by the Overture Maps Foundation
-"""The places model: settings read from the model jar, and the loaders workers use.
+"""The places model: settings read from the model jar, and the engines workers run.
 
-The driver reads the blocking settings once into ``PlacesModel``. Workers
-read the booster and the name sketch out of the jar that ``sc.addFile``
-shipped to them, once per process.
+The driver reads the blocking settings once into ``PlacesModel``. The engine
+functions return ``Column`` callables that read the booster and the name
+sketch out of the jar ``sc.addFile`` shipped to workers, once per process.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ from __future__ import annotations
 import io
 import json
 import math
-import os
 import zipfile
 from dataclasses import dataclass
 from functools import cache
@@ -28,6 +27,8 @@ from overture_matchers.places.model_jar import open_jar
 from overture_matchers.sketches import CountMinSketch
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
     import pandas as pd
     from pyspark.sql import Column, SparkSession
 
@@ -41,27 +42,29 @@ class PlacesModel:
     """Settings of the model jar.
 
     Attributes:
-        jar_name: File name of the jar, which is where workers find it.
         blocking_features: Blocking features in booster order.
         blocking_threshold: Smallest blocking score that keeps a pair.
         blocking_radius_m: Largest distance between the places of a pair.
     """
 
-    jar_name: str
     blocking_features: tuple[str, ...]
     blocking_threshold: float
     blocking_radius_m: float
 
     @classmethod
     def load(cls, spark: SparkSession, model_jar: str) -> PlacesModel:
-        """Read the settings from ``model_jar``.
+        """Read the settings from ``model_jar``."""
+        with open_jar(spark, model_jar) as jar:
+            return cls.from_config(json.loads(jar.read(BLOCKING_CONFIG_RESOURCE)))
+
+    @classmethod
+    def from_config(cls, config: dict) -> PlacesModel:
+        """Settings from the jar's parsed blocking config.
 
         Raises:
             ValueError: The blocking feature order names a feature that
                 ``features.py`` does not produce.
         """
-        with open_jar(spark, model_jar) as jar:
-            config = json.loads(jar.read(BLOCKING_CONFIG_RESOURCE))
         order = tuple(config["feature_order"])
         unknown = [
             f
@@ -74,7 +77,6 @@ class PlacesModel:
                 f"only {sorted([*features.BLOCKING_FEATURES, features.GEO_DISTANCE])}"
             )
         return cls(
-            jar_name=os.path.basename(model_jar.rstrip("/")),
             blocking_features=order,
             blocking_threshold=float(config["prediction_threshold"]),
             blocking_radius_m=float(config["spatial_radius_m"]),
@@ -122,40 +124,45 @@ def load_name_idf(jar_name: str) -> tuple[CountMinSketch, int]:
     return CountMinSketch(row["cms_bytes"]), row["num_docs"]
 
 
-def name_idf_udf(jar_name: str, tokens: Column) -> Column:
-    """Map of each distinct name token to its inverse document frequency.
+def name_idf(
+    sketch: CountMinSketch, num_docs: int, tokens: list[str] | None
+) -> dict[str, float]:
+    """Inverse document frequency of each distinct token. Null gives an empty map."""
+    return {
+        t: math.log(num_docs / max(1, sketch.estimate_count(t))) + 1.0
+        for t in tokens or ()
+        if t is not None
+    }
 
-    Args:
-        jar_name: File name of the shipped model jar.
-        tokens: Array-of-string column. Null gives an empty map.
-    """
+
+def name_idf_udf(jar_name: str) -> Callable[[Column], Column]:
+    """``name_idf`` over an array-of-string column, with the shipped jar's sketch."""
 
     def idf_map(tokens: list[str] | None) -> dict[str, float]:
-        sketch, num_docs = load_name_idf(jar_name)
-        return {
-            t: math.log(num_docs / max(1, sketch.estimate_count(t))) + 1.0
-            for t in tokens or ()
-            if t is not None
-        }
+        return name_idf(*load_name_idf(jar_name), tokens)
 
-    return F.udf(idf_map, MapType(StringType(), DoubleType(), False))(tokens)
+    return F.udf(idf_map, MapType(StringType(), DoubleType(), False))
 
 
-def predict_udf(jar_name: str, resource: str, inputs: list[Column]) -> Column:
-    """Probability of the positive class, from the booster at ``resource``.
+def predict(booster, columns: Sequence[pd.Series]) -> pd.Series:
+    """Probability of the positive class for each row. NaN means missing."""
+    import numpy as np
+    import pandas as pd
+
+    matrix = np.column_stack(columns).astype(np.float32)
+    return pd.Series(booster.inplace_predict(matrix).astype(np.float64))
+
+
+def predict_udf(jar_name: str, resource: str) -> Callable[[list[Column]], Column]:
+    """``predict`` over feature columns in booster order, with the shipped booster.
 
     Args:
         jar_name: File name of the shipped model jar.
         resource: Booster path inside the jar.
-        inputs: Feature columns in booster order. Null becomes missing.
     """
-    import numpy as np
-    import pandas as pd
 
-    def predict(*columns: pd.Series) -> pd.Series:
-        matrix = np.column_stack(columns).astype(np.float32)
-        booster = load_booster(jar_name, resource)
-        return pd.Series(booster.inplace_predict(matrix).astype(np.float64))
+    def score(*columns: pd.Series) -> pd.Series:
+        return predict(load_booster(jar_name, resource), columns)
 
-    udf = F.pandas_udf(predict, DoubleType(), F.PandasUDFType.SCALAR)
-    return udf(*inputs)
+    udf = F.pandas_udf(score, DoubleType(), F.PandasUDFType.SCALAR)
+    return lambda inputs: udf(*inputs)
