@@ -5,8 +5,9 @@
 A "core word" is a name token such as a brand or category word ("pizza",
 "bank") that many places in the same area share, so it says little about
 which place a record is. The model jar ships a Bloom filter of these tokens
-per H3 cell. A token is considered "in the background" when the model jar's Bloom filter holds
-``<res>:<cell>:<token>`` for the record's H3 cell at resolution 9, 7, 5 or 3.
+per H3 cell. A token is considered "in the background" when the model
+jar's Bloom filter holds ``<res>:<cell>:<token>`` for the record's H3 cell
+at resolution 9, 7, 5 or 3.
 The functions here only run on Spark workers, which read the filter out of
 the model jar that ``sc.addFile`` shipped to them.
 """
