@@ -21,7 +21,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import ArrayType, StringType
 from sedona.spark.sql.st_functions import ParseAddress
 
-from overture_matchers.places.background_tokens import strip_background_udf
+from overture_matchers.places.background_tokens import strip_background_tokens_udf
 from overture_matchers.quadkey import focal_quadkey
 
 if TYPE_CHECKING:
@@ -202,7 +202,7 @@ def _matching_columns(
     quadkey = focal_quadkey(lat, lng, BLOCKING_RESOLUTION)
     source = _source(F.col("sources"))
     cell = F.expr("ST_H3CellIDs(ST_GeomFromWKB(geometry), 9, false)[0]")
-    stripped_tokens = strip_background_udf(model_jar_name, name_tokens, cell)
+    stripped_tokens = strip_background_tokens_udf(model_jar_name, name_tokens, cell)
     hosts, urls = _website_columns(df)
     return {
         "id": F.col("id"),
