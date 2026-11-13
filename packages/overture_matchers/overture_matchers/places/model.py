@@ -91,9 +91,27 @@ def load_booster(jar_name: str, resource: str):
     """The XGBoost booster stored at ``resource`` in the jar. It predicts on one thread."""
     import xgboost
 
+    model = _read_resource(resource, jar_name)
+    check_xgboost_version(model, xgboost.__version__)
     booster = xgboost.Booster({"nthread": 1})
-    booster.load_model(bytearray(_read_resource(resource, jar_name)))
+    booster.load_model(bytearray(model))
     return booster
+
+
+def check_xgboost_version(model: bytes, installed: str) -> None:
+    """Raise unless ``installed`` XGBoost reads the JSON booster ``model`` as written.
+
+    XGBoost reads models from older versions only. An older reader can misread
+    newer fields and silently shift every score.
+    """
+    writer = tuple(json.loads(model)["version"][:2])
+    reader = tuple(int(part) for part in installed.split(".")[:2])
+    if reader < writer or reader[0] != writer[0]:
+        raise RuntimeError(
+            f"The model was saved by XGBoost {writer[0]}.{writer[1]}, "
+            f"but XGBoost {installed} is installed. "
+            f"Install XGBoost {writer[0]}.x at {writer[0]}.{writer[1]} or newer."
+        )
 
 
 @cache

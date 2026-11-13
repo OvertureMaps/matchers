@@ -16,7 +16,7 @@ from pyspark.sql import Row
 
 from overture_matchers.places import features
 from overture_matchers.places.blocking import PAIR_COLUMNS, blocking_pairs
-from overture_matchers.places.model import PlacesModel
+from overture_matchers.places.model import PlacesModel, check_xgboost_version
 from overture_matchers.prematch import history_pairs
 from overture_matchers.sketches import CountMinSketch
 
@@ -116,6 +116,19 @@ def test_model_rejects_an_unknown_blocking_feature(spark, jar, monkeypatch):
     monkeypatch.delitem(features.BLOCKING_FEATURES, "name_similarity")
     with pytest.raises(ValueError, match="name_similarity"):
         PlacesModel.load(spark, jar)
+
+
+def test_booster_from_a_newer_xgboost_is_rejected():
+    model = json.loads(
+        xgboost.train({}, xgboost.DMatrix([[0.0]], label=[0])).save_raw("json")
+    )
+    major, minor = (int(p) for p in xgboost.__version__.split(".")[:2])
+    model["version"] = [major, minor, 0]
+    check_xgboost_version(json.dumps(model).encode(), xgboost.__version__)
+    for newer in ([major, minor + 1, 0], [major + 1, 0, 0]):
+        model["version"] = newer
+        with pytest.raises(RuntimeError, match="saved by XGBoost"):
+            check_xgboost_version(json.dumps(model).encode(), xgboost.__version__)
 
 
 def test_history_pairs_explode_base_ids(spark):
