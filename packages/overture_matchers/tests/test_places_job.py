@@ -15,6 +15,7 @@ from overture_matchers.core.stages import (
     SetupOutput,
 )
 from overture_matchers.places import job
+from overture_matchers.places.blocking import SPATIAL_JOIN_CONF
 
 
 def test_output_names_match_scala_postfixes_and_are_unique():
@@ -42,7 +43,7 @@ def params(spark, tmp_path):
 
 
 @pytest.fixture
-def fake_setup(spark, monkeypatch):
+def stub_stages(spark, monkeypatch):
     def setup(
         raw, provider, model_jar, baseline_provider=None, match_history=True
     ) -> SetupOutput:
@@ -53,10 +54,17 @@ def fake_setup(spark, monkeypatch):
 
     monkeypatch.setattr(job, "setup", setup)
     monkeypatch.setattr(job, "matching", matching)
+    saved = {key: spark.conf.get(key, None) for key in SPATIAL_JOIN_CONF}
+    yield
+    for key, value in saved.items():
+        if value is None:
+            spark.conf.unset(key)
+        else:
+            spark.conf.set(key, value)
 
 
 def test_job_writes_config_then_stops_at_first_stub(
-    spark, tmp_path, params, fake_setup
+    spark, tmp_path, params, stub_stages
 ):
     runner = job.PlacesMatchingJob()
     runner.spark = spark
@@ -64,6 +72,7 @@ def test_job_writes_config_then_stops_at_first_stub(
     assert isinstance(result.exception, NotImplementedError)
     assert (tmp_path / "run" / "config.json").is_file()
     assert "/run/checkpoints/" in spark.sparkContext.getCheckpointDir()
+    assert spark.conf.get("spark.sql.adaptive.enabled") == "false"
     assert "matching" in str(result.exception)
     assert not (tmp_path / "run" / "_completed_stages" / "matching").exists()
 
@@ -128,7 +137,7 @@ def test_run_chains_stage_outputs_and_skips_on_rerun(spark, params, monkeypatch)
     assert calls == {}
 
 
-def test_run_local_reads_params_file(spark, tmp_path, params, fake_setup):
+def test_run_local_reads_params_file(spark, tmp_path, params, stub_stages):
     params_file = tmp_path / "params.json"
     params_file.write_text(json.dumps(params))
     with pytest.raises(NotImplementedError, match="matching"):

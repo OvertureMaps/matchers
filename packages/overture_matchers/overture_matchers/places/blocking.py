@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pyspark import StorageLevel
 from pyspark.sql import functions as F
 
 from overture_matchers.places import features
@@ -48,7 +47,6 @@ KEY = ("id", "provider")
 SHUFFLE_PARTITIONS_CONF = "spark.sql.shuffle.partitions"
 DEFAULT_SHUFFLE_PARTITIONS = "1920"
 SPATIAL_PARTITIONS_PER_CORE = 20
-_SERIALIZED = StorageLevel(True, True, False, False, 1)
 # Session settings ``spatial_pairs`` needs. Sedona partitions and indexes the
 # right side, and adaptive execution would re-plan the join's partitions.
 SPATIAL_JOIN_CONF = {
@@ -128,18 +126,16 @@ def prune(
         partitions: Partitions of the result.
 
     Returns:
-        ``id``, ``provider``, ``base_id`` and ``base_provider``. Persisted, so
-        each pair is scored once however often the result is read.
+        ``id``, ``provider``, ``base_id`` and ``base_provider``.
     """
     columns: list[Column] = [
-        F.col(f) if f == features.GEO_DISTANCE else features.BLOCKING_FEATURES[f]()
-        for f in model.blocking_features
+        features.BLOCKING_FEATURES[f]() for f in model.blocking_features
     ]
     keys = pairs.select(
         "id", "provider", "base_id", "base_provider", score(columns).alias("score")
     )
     survivors = keys.filter(F.col("score") >= model.blocking_threshold).drop("score")
-    return _by_pair_key(survivors, partitions).persist(_SERIALIZED)
+    return _by_pair_key(survivors, partitions)
 
 
 def blocking_pairs(
@@ -159,8 +155,10 @@ def blocking_pairs(
         score: Blocking score from the feature columns in model order.
 
     Returns:
-        Each side's key, ``record_type`` and ``PAIR_COLUMNS``. The right side
-        has ``base_`` on every name. The left side is the smaller id.
+        The right side's key, ``record_type`` and ``PAIR_COLUMNS``, each with
+        ``base_`` in front, then the same columns of the left side. The left
+        side is the smaller id. Each read reruns blocking, so callers
+        checkpoint the result.
     """
     spark = candidates.sparkSession
     shuffle_partitions = int(
@@ -175,9 +173,7 @@ def blocking_pairs(
         )
     )
 
-    inputs = [
-        c for f in model.blocking_features for c in features.FEATURE_INPUTS.get(f, ())
-    ]
+    inputs = [c for f in model.blocking_features for c in features.FEATURE_INPUTS[f]]
     needs_idf = features.NAME_IDF in inputs
     carried = list(dict.fromkeys(inputs))
     spatial_input = (

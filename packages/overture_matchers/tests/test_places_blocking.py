@@ -168,6 +168,8 @@ def test_booster_from_a_newer_xgboost_is_rejected():
         model["version"] = newer
         with pytest.raises(RuntimeError, match="saved by XGBoost"):
             check_xgboost_version(json.dumps(model).encode(), xgboost.__version__)
+    with pytest.raises(RuntimeError, match="JSON"):
+        check_xgboost_version(b"binf", xgboost.__version__)
 
 
 def test_history_pairs_explode_base_ids(spark):
@@ -208,6 +210,8 @@ def test_blocking_keeps_close_similar_pairs_in_id_order(spark):
         unit_idf,
         name_similarity_score,
     )
+    plan = out._jdf.queryExecution().executedPlan().toString()
+    assert "DistanceJoin" in plan
     assert out.columns[:3] == ["base_id", "base_provider", "base_record_type"]
     assert out.columns[-len(PAIR_COLUMNS) :] == list(PAIR_COLUMNS)
     pairs = {
@@ -264,7 +268,14 @@ def test_features_read_only_their_declared_inputs(spark, name):
     inputs = features.FEATURE_INPUTS[name]
     types = {features.NAME_IDF: "map<string,double>"}
     schema = ", ".join(
-        f"{side}{c} {types.get(c, 'string')}" for c in inputs for side in ("", "base_")
+        [
+            f"{features.GEO_DISTANCE} double",
+            *(
+                f"{side}{c} {types.get(c, 'string')}"
+                for c in inputs
+                for side in ("", "base_")
+            ),
+        ]
     )
     df = spark.createDataFrame([], schema)
     df.select(features.BLOCKING_FEATURES[name]()).collect()

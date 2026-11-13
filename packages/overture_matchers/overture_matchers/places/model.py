@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from functools import cache
 from typing import TYPE_CHECKING
 
+import pandas as pd
 import pyarrow.parquet as pq
 from pyspark import SparkFiles
 from pyspark.sql import functions as F
@@ -29,7 +30,6 @@ from overture_matchers.sketches import CountMinSketch
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    import pandas as pd
     from pyspark.sql import Column, SparkSession
 
 BLOCKING_CONFIG_RESOURCE = "places_matcher_model/metadata/blocking_config"
@@ -53,8 +53,13 @@ class PlacesModel:
 
     @classmethod
     def load(cls, spark: SparkSession, model_jar: str) -> PlacesModel:
-        """Read the settings from ``model_jar``."""
+        """Read the settings from ``model_jar`` and check its booster's XGBoost version."""
+        import xgboost
+
         with open_jar(spark, model_jar) as jar:
+            check_xgboost_version(
+                jar.read(BLOCKING_BOOSTER_RESOURCE), xgboost.__version__
+            )
             return cls.from_config(json.loads(jar.read(BLOCKING_CONFIG_RESOURCE)))
 
     @classmethod
@@ -66,15 +71,11 @@ class PlacesModel:
                 ``features.py`` does not produce.
         """
         order = tuple(config["feature_order"])
-        unknown = [
-            f
-            for f in order
-            if f not in features.BLOCKING_FEATURES and f != features.GEO_DISTANCE
-        ]
+        unknown = [f for f in order if f not in features.BLOCKING_FEATURES]
         if unknown:
             raise ValueError(
                 f"blocking feature_order needs {unknown}, but features.py produces "
-                f"only {sorted([*features.BLOCKING_FEATURES, features.GEO_DISTANCE])}"
+                f"only {sorted(features.BLOCKING_FEATURES)}"
             )
         return cls(
             blocking_features=order,
@@ -94,7 +95,6 @@ def load_booster(jar_name: str, resource: str):
     import xgboost
 
     model = _read_resource(resource, jar_name)
-    check_xgboost_version(model, xgboost.__version__)
     booster = xgboost.Booster({"nthread": 1})
     booster.load_model(bytearray(model))
     return booster
@@ -106,7 +106,10 @@ def check_xgboost_version(model: bytes, installed: str) -> None:
     XGBoost reads models from older versions only. An older reader can misread
     newer fields and silently shift every score.
     """
-    writer = tuple(json.loads(model)["version"][:2])
+    try:
+        writer = tuple(json.loads(model)["version"][:2])
+    except ValueError as e:
+        raise RuntimeError("The booster must be saved as XGBoost JSON.") from e
     reader = tuple(int(part) for part in installed.split(".")[:2])
     if reader < writer or reader[0] != writer[0]:
         raise RuntimeError(
@@ -147,7 +150,6 @@ def name_idf_udf(jar_name: str) -> Callable[[Column], Column]:
 def predict(booster, columns: Sequence[pd.Series]) -> pd.Series:
     """Probability of the positive class for each row. NaN means missing."""
     import numpy as np
-    import pandas as pd
 
     matrix = np.column_stack(columns).astype(np.float32)
     return pd.Series(booster.inplace_predict(matrix).astype(np.float64))
@@ -164,5 +166,5 @@ def predict_udf(jar_name: str, resource: str) -> Callable[[list[Column]], Column
     def score(*columns: pd.Series) -> pd.Series:
         return predict(load_booster(jar_name, resource), columns)
 
-    udf = F.pandas_udf(score, DoubleType(), F.PandasUDFType.SCALAR)
+    udf = F.pandas_udf(score, DoubleType())
     return lambda inputs: udf(*inputs)

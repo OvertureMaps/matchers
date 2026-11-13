@@ -15,8 +15,6 @@ from __future__ import annotations
 
 import struct
 
-import numpy as np
-
 _MASK = 0xFFFFFFFF
 
 
@@ -111,11 +109,9 @@ class CountMinSketch:
         version, _, self._depth, self._width = struct.unpack_from(">iqii", data)
         if version != 1:
             raise ValueError(f"unsupported CountMinSketch version {version}")
-        # The table stays big-endian and unconverted, so it costs no more memory than the bytes.
-        table_start = struct.calcsize(">iqii") + 8 * self._depth
-        self._table = np.frombuffer(data, dtype=">i8", offset=table_start).reshape(
-            self._depth, self._width
-        )
+        self._data = data
+        # The table stays packed, like the Bloom filter's bitset.
+        self._table_start = struct.calcsize(">iqii") + 8 * self._depth
 
     def estimate_count(self, value: str) -> int:
         """Upper bound of how many times ``value`` was added."""
@@ -123,6 +119,10 @@ class CountMinSketch:
         h1 = murmur3_32(raw, 0)
         h2 = murmur3_32(raw, h1)
         return min(
-            int(self._table[i, abs(_signed((h1 + i * h2) & _MASK)) % self._width])
+            struct.unpack_from(">q", self._data, self._cell(i, h1, h2))[0]
             for i in range(self._depth)
         )
+
+    def _cell(self, row: int, h1: int, h2: int) -> int:
+        column = abs(_signed((h1 + row * h2) & _MASK)) % self._width
+        return self._table_start + 8 * (row * self._width + column)

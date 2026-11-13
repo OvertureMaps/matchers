@@ -51,7 +51,6 @@ from overture_matchers.places.runtime import (
     ship_model_and_libpostal_data_to_workers,
 )
 from overture_matchers.places.selection import select_winners
-from overture_matchers.prematch import history_pairs
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -120,10 +119,8 @@ def matching(
     """
     spark = prepared.candidates.sparkSession
     spark.sparkContext.addFile(model_jar)
-    for key, value in SPATIAL_JOIN_CONF.items():
-        spark.conf.set(key, value)
     model = PlacesModel.load(spark, model_jar)
-    jar_name = os.path.basename(model_jar.rstrip("/"))
+    jar_name = os.path.basename(model_jar)
     to_block = prepared.candidates.filter(F.col("base_ids").isNull()).drop("base_ids")
     blocked = io.checkpoint(
         blocking_pairs(
@@ -137,8 +134,7 @@ def matching(
         "blocking",
         FEATURE_TYPE,
     )
-    history = history_pairs(prepared.candidates)  # consumed by scoring
-    del blocked, history
+    del blocked
     raise NotImplementedError("matching: scoring and clustering are not ported yet")
 
 
@@ -193,6 +189,9 @@ def run(spark: SparkSession, config: RunConfig) -> None:
         raise ValueError("places needs the modelJar param")
     # GraphFrames connected components needs a checkpoint directory.
     spark.sparkContext.setCheckpointDir(io.run_uri(config.output_path, "checkpoints"))
+    # Set once for the whole job, so fresh and resumed runs plan stages alike.
+    for key, value in SPATIAL_JOIN_CONF.items():
+        spark.conf.set(key, value)
     raw = RawInputs(
         spark.read.parquet(*config.input[FEATURE_TYPE]),
         spark.read.parquet(*config.baseline[FEATURE_TYPE]),
