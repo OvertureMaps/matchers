@@ -29,13 +29,14 @@ _PARAM_FIELDS = {
     "provider": "provider",
     "baselineProvider": "baseline_provider",
     "matchHistory": "match_history",
+    "outputDebug": "output_debug",
     "embeddingsCacheTable": "embeddings_cache_table",
     "previousMetricsPath": "previous_metrics_path",
     "modelJar": "model_jar",
     "blockingResolution": "blocking_resolution",
 }
 _REQUIRED = ("output_path", "input", "baseline", "provider")
-_BOOLS = ("match_history",)
+_BOOLS = ("match_history", "output_debug")
 _PATH_MAPS = ("input", "baseline")
 
 LIBPOSTAL_DATA_DIR_CONF = "spark.sedona.libpostal.dataDir"
@@ -117,6 +118,7 @@ class RunConfig:
         baseline_provider: Provider to stamp on a baseline that has no
             ``provider`` column, such as a Places release. Places only.
         match_history: Whether candidates with history matches skip scoring.
+        output_debug: Whether stages also write their debug outputs.
         model_jar: The ``places-matcher-model`` jar. Only places reads it.
         blocking_resolution: Quadkey zoom (1 to 23) for ``blocking_keys`` and
             ``signature`` in places setup. Places defaults to 16 when unset.
@@ -129,6 +131,7 @@ class RunConfig:
     baseline_provider: str | None = None
     # Scala's theme configs default this to true.
     match_history: bool = True
+    output_debug: bool = True
     embeddings_cache_table: str | None = None
     previous_metrics_path: str | None = None
     model_jar: str | None = None

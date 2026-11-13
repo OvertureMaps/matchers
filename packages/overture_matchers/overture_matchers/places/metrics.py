@@ -9,6 +9,11 @@ from typing import TYPE_CHECKING
 
 from pyspark.sql import functions as F
 
+from overture_matchers.clustering import (
+    BASELINE_BASELINE,
+    CANDIDATE_CANDIDATE,
+    NO_MATCH,
+)
 from overture_matchers.metrics import (
     SHARED_METRICS,
     Metric,
@@ -17,12 +22,7 @@ from overture_matchers.metrics import (
     compute_percentage,
     round_half_up,
 )
-from overture_matchers.places.selection import (
-    BASELINE_BASELINE,
-    CANDIDATE,
-    CANDIDATE_CANDIDATE,
-    NO_MATCH,
-)
+from overture_matchers.prematch import CANDIDATE
 
 if TYPE_CHECKING:
     from pyspark.sql import Column, DataFrame, Row
