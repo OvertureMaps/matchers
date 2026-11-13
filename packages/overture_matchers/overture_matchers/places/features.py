@@ -225,7 +225,6 @@ class PairwiseLookups(NamedTuple):
 # Java's String.trim strips every character up to and including the space.
 _JAVA_WHITESPACE = "".join(map(chr, range(33)))
 _INT8_SCALE = 1.0 / (127.0 * 127.0)
-_UNSIGNED_LONG = 1 << 64
 
 
 def _name_h3_bin(name: str | None, cell: int | None, lookups: PairwiseLookups) -> int:
@@ -235,14 +234,17 @@ def _name_h3_bin(name: str | None, cell: int | None, lookups: PairwiseLookups) -
     name_key = name.strip(_JAVA_WHITESPACE).lower()
     if not name_key:
         return 0
-    key = f"{NAME_H3_RESOLUTION}:{cell % _UNSIGNED_LONG}:{name_key}"
+    key = f"{NAME_H3_RESOLUTION}:{cell}:{name_key}"
     if lookups.name_common(key):
         return 2
     return 1 if lookups.name_repeated(key) else 0
 
 
 def _cosine(left: bytes | None, right: bytes | None) -> float | None:
-    """Cosine of two int8 embeddings scaled to unit length, or None if either is missing."""
+    """Cosine of two int8 embeddings scaled to unit length.
+
+    None if either is missing or the lengths differ.
+    """
     if not left or not right or len(left) != len(right):
         return None
     dot = int(
