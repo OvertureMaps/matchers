@@ -4,13 +4,11 @@
 
 from __future__ import annotations
 
+import io
 import json
-import os
 import tempfile
 import zipfile
 from typing import TYPE_CHECKING
-
-from pyspark import SparkFiles
 
 if TYPE_CHECKING:
     from pyspark.sql import DataFrame, SparkSession
@@ -20,9 +18,9 @@ REFERENCE_RESOURCE = "places_matcher_model/combined_test_dataset.parquet"
 
 
 def _open(spark: SparkSession, model_jar: str) -> zipfile.ZipFile:
-    # addFile fetches any Hadoop-readable URI to the driver's local file area.
-    spark.sparkContext.addFile(model_jar)
-    return zipfile.ZipFile(SparkFiles.get(os.path.basename(model_jar.rstrip("/"))))
+    # binaryFile reads any Hadoop-readable URI without changing session state.
+    content = spark.read.format("binaryFile").load(model_jar).first()["content"]
+    return zipfile.ZipFile(io.BytesIO(content))
 
 
 def read_feature_order(spark: SparkSession, model_jar: str) -> tuple[str, ...]:
