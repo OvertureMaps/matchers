@@ -8,7 +8,7 @@ import pytest
 from pyspark.sql import functions as F
 
 from overture_matchers.core.stages import RawInputs
-from overture_matchers.places.coreword import h3_parent
+from overture_matchers.places.background_tokens import h3_parent
 from overture_matchers.places.job import SetupOutput, setup
 from overture_matchers.places.prepare import (
     _address_columns,
