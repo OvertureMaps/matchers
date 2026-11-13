@@ -179,7 +179,9 @@ def _optional_metric_inputs(
         ),
         "reference": _try(
             "reference z-scores",
-            lambda: model_jar.read_reference_dataset(spark, config.model_jar),
+            lambda: model_jar.read_reference_dataset(
+                spark, config.model_jar, config.output_path
+            ),
         ),
         "previous": _try(
             "previous release z-scores",

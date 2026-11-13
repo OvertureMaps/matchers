@@ -1,7 +1,11 @@
 """Tests the shared and places metrics on a few rows."""
 
+import json
+import zipfile
+
 from overture_matchers import metrics as shared
 from overture_matchers.places import metrics as places
+from overture_matchers.places import model_jar
 
 PAIRS = [
     "cluster_id",
@@ -102,3 +106,30 @@ def test_to_frame_keeps_first_row_per_key(spark):
     rows = {(r["metric_id"], r["sub_partition"]): r for r in frame.collect()}
     assert {k: r["value"] for k, r in rows.items()} == {("M", ""): 1.0, ("M", "x"): 3.0}
     assert {r["primary_partition"] for r in rows.values()} == {"acme-places"}
+
+
+def test_feature_stats_with_a_model_jar(spark, tmp_path):
+    reference = tmp_path / "reference"
+    spark.createDataFrame([(0.0,), (2.0,)], "f double").coalesce(1).write.parquet(
+        str(reference)
+    )
+    jar = tmp_path / "model.jar"
+    with zipfile.ZipFile(jar, "w") as z:
+        z.writestr(model_jar.CONFIG_RESOURCE, json.dumps({"feature_order": ["f"]}))
+        z.write(next(reference.glob("*.parquet")), model_jar.REFERENCE_RESOURCE)
+    sample = spark.createDataFrame([(3.0,), (5.0,)], "f double")
+    rows = by_id(
+        places.feature_stats(
+            inputs(
+                spark,
+                score_sample=sample,
+                feature_order=model_jar.read_feature_order(spark, str(jar)),
+                reference=model_jar.read_reference_dataset(
+                    spark, str(jar), str(tmp_path / "run")
+                ),
+            )
+        )
+    )
+    assert rows[("MatchFeature.f", "mean")] == 4.0
+    # (4 - 1) / sqrt(2)
+    assert rows[("MatchFeatureZScore", "f")] == 2.1213

@@ -4,9 +4,9 @@
 
 from __future__ import annotations
 
-import io as _io
 import json
 import os
+import tempfile
 import zipfile
 from typing import TYPE_CHECKING
 
@@ -32,11 +32,17 @@ def read_feature_order(spark: SparkSession, model_jar: str) -> tuple[str, ...]:
     return tuple(config["feature_order"])
 
 
-def read_reference_dataset(spark: SparkSession, model_jar: str) -> DataFrame:
-    """The model's reference feature table. Raises KeyError if the jar has none."""
-    import pyarrow.parquet as pq
+def read_reference_dataset(
+    spark: SparkSession, model_jar: str, output_path: str
+) -> DataFrame:
+    """The model's reference feature table. Raises KeyError if the jar has none.
 
-    with _open(spark, model_jar) as jar:
-        table = pq.read_table(_io.BytesIO(jar.read(REFERENCE_RESOURCE)))
-    # Built on the driver: the unpacked file is not visible to executors.
-    return spark.createDataFrame(table.to_pandas())
+    The file is copied into the run folder first, so executors can read it.
+    """
+    with _open(spark, model_jar) as jar, tempfile.TemporaryDirectory() as tmp:
+        local = jar.extract(REFERENCE_RESOURCE, tmp)
+        jvm = spark.sparkContext._jvm
+        dest = jvm.org.apache.hadoop.fs.Path(f"{output_path}/{REFERENCE_RESOURCE}")
+        fs = dest.getFileSystem(spark.sparkContext._jsc.hadoopConfiguration())
+        fs.copyFromLocalFile(False, True, jvm.org.apache.hadoop.fs.Path(local), dest)
+    return spark.read.parquet(dest.toString())
