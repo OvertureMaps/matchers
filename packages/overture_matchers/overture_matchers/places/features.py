@@ -81,13 +81,16 @@ def name_tfidf() -> Column:
 
 
 BLOCKING_FEATURES = {
+    GEO_DISTANCE: lambda: F.col(GEO_DISTANCE),
     "name_similarity": name_similarity,
     "phone_number_similarity_availability": phone_number_similarity_availability,
     "house_number_similarity_availability": house_number_similarity_availability,
     "name_tfidf": name_tfidf,
 }
-# The columns each side of a pair carries for a feature.
+# The columns each side of a pair carries for a feature. Every pair also has
+# GEO_DISTANCE.
 FEATURE_INPUTS = {
+    GEO_DISTANCE: (),
     "name_similarity": ("name_clean",),
     "phone_number_similarity_availability": ("normalized_phone", "country"),
     "house_number_similarity_availability": ("house_number",),
