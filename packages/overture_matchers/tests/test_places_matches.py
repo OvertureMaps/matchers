@@ -2,6 +2,7 @@
 # Copyright (c) 2026 by the Overture Maps Foundation
 """Tests for accepted place pairs, their clusters and the NO_MATCH rows."""
 
+import pyarrow.parquet as pq
 import pytest
 from pyspark.sql import functions as F
 
@@ -134,14 +135,16 @@ def test_no_match_rows_cover_candidates_in_no_pair(spark):
     assert len({r.cluster_id for r in rows}) == 2
 
 
-def test_match_results_cluster_connected_pairs(spark, checkpoint_dir):
+def test_match_results_cluster_connected_pairs(spark, checkpoint_dir, tmp_path):
     candidates = spark.createDataFrame(
         [("c1", "p"), ("c2", "p"), ("c3", "p")], "id string, provider string"
     )
     accepted = pairs(spark, ("c1", C, "b1", B), ("b1", B, "b2", B), ("b3", B, "c2", C))
     out = match_results(accepted, candidates)
-    required = {f.name for f in out.schema if not f.nullable}
-    assert {"composite_score", "base_active"} <= required
+    out.write.parquet(str(tmp_path / "matches"))
+    written = pq.read_schema(next((tmp_path / "matches").glob("*.parquet")))
+    required = {f.name for f in written if not f.nullable}
+    assert required == {"composite_score", "base_active"}
     rows = out.collect()
     assert clusters(r for r in rows if r.match_type == "match") == {
         frozenset({"c1", "b1", "b2"}),

@@ -123,14 +123,15 @@ def match_rows(pairs: DataFrame, components: DataFrame) -> DataFrame:
     for left, right in SWAPPED_SIDES:
         sides[left] = F.when(swap, F.col(f"p.{right}")).otherwise(F.col(f"p.{left}"))
         sides[right] = F.when(swap, F.col(f"p.{left}")).otherwise(F.col(f"p.{right}"))
+    sub_type = _match_sub_type(F.col("p.record_type"), F.col("p.base_record_type"))
     columns = {
         **sides,
         "composite_score": _required_score(F.col("p.composite_score")),
         "cluster_id": F.col("c.component").cast("string"),
-        "match_type": F.lit(MATCH),
-        "match_sub_type": _match_sub_type(
-            F.col("p.record_type"), F.col("p.base_record_type")
-        ),
+        # Always MATCH. Deriving it from the data keeps it nullable in the
+        # written schema, where a literal would be folded to non-nullable.
+        "match_type": F.when(sub_type.isNotNull(), F.lit(MATCH)),
+        "match_sub_type": sub_type,
         "base_active": F.lit(1),
     }
     return p.join(components.alias("c"), F.col("p.id") == F.col("c.id")).select(
