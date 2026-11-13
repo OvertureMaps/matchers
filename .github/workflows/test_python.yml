@@ -80,7 +80,7 @@ jobs:
           restore-keys: ivy-${{ matrix.package }}-
 
       - name: Run tests
-        run: uv run pytest -v
+        run: uv run pytest -v --cov --cov-report=term-missing
 
       - name: Build package
         run: uv build
