@@ -34,12 +34,14 @@ def read_feature_order(spark: SparkSession, model_jar: str) -> tuple[str, ...]:
 
 def read_reference_dataset(
     spark: SparkSession, model_jar: str, output_path: str
-) -> DataFrame:
-    """The model's reference feature table. Raises KeyError if the jar has none.
+) -> DataFrame | None:
+    """The model's reference feature table, or None if the jar has none.
 
     The file is copied into the run folder first, so executors can read it.
     """
     with _open(spark, model_jar) as jar, tempfile.TemporaryDirectory() as tmp:
+        if REFERENCE_RESOURCE not in jar.namelist():
+            return None
         local = jar.extract(REFERENCE_RESOURCE, tmp)
         jvm = spark.sparkContext._jvm
         dest = jvm.org.apache.hadoop.fs.Path(f"{output_path}/{REFERENCE_RESOURCE}")
