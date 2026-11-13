@@ -73,6 +73,16 @@ def test_winners(selected):
     }
 
 
+def test_a_cluster_without_a_winner_raises(spark):
+    # "s" is both a candidate and a baseline ID, so the cluster has no CB pair.
+    matches = spark.createDataFrame(
+        [pair("orphan", "c1", "s", CC), pair("orphan", "s", "b1", BB)], PAIR_COLUMNS
+    )
+    baseline = spark.createDataFrame([("b1", 1)], "id string, active int")
+    with pytest.raises(ValueError, match="orphan"):
+        select_winners(matches, baseline)
+
+
 def test_fallout_folds_losing_candidates_into_the_winner(selected):
     _, fallout = selected
     assert fallout == {("c1", "c2"), ("c3", "c2"), ("x", "y"), ("w", "z")}

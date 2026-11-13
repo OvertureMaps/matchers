@@ -45,6 +45,8 @@ from overture_matchers.places.runtime import (
 from overture_matchers.places.selection import select_winners
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from pyspark.sql import DataFrame, SparkSession
 
 logger = logging.getLogger(__name__)
@@ -122,12 +124,12 @@ def metrics(
     matched: MatchingOutput,
     assigned: AssignIdsOutput,
     provider: str,
-    **optional: object,
+    load_optional: Callable[[], dict[str, object]] = dict,
 ) -> MetricsOutput:
     """Count matches and churn.
 
-    ``optional`` holds the `MetricInputs` fields that are not always there: ``blocking``,
-    ``scores``, ``score_sample``, ``feature_order``, ``reference`` and ``previous``.
+    ``load_optional`` returns the optional `MetricInputs` fields that this run has.
+    It is called only when the stage runs.
     """
     inputs = MetricInputs(
         raw.candidates,
@@ -137,7 +139,7 @@ def metrics(
         matched.matches,
         assigned.final,
         provider,
-        **optional,
+        **load_optional(),
     )
     rows = compute_metrics(inputs, METRICS)
     spark = raw.candidates.sparkSession
@@ -164,25 +166,33 @@ def _try(description: str, load):
         return None
 
 
+def _reference(spark: SparkSession, config: RunConfig) -> DataFrame | None:
+    reference = model_jar.read_reference_dataset(
+        spark, config.model_jar, config.output_path
+    )
+    if reference is None:
+        logger.warning("The model jar has no reference dataset; skipping z-scores")
+    return reference
+
+
 def _optional_metric_inputs(
     spark: SparkSession, config: RunConfig
 ) -> dict[str, object]:
     """Load the metric inputs that a run may lack. Anything missing is left out."""
-    scores = _read_if_present(spark, config, "scores")
+    scores = _try("score metrics", lambda: _read_if_present(spark, config, "scores"))
     found = {
-        "blocking": _read_if_present(spark, config, "blocking"),
+        "blocking": _try(
+            "blocking metrics", lambda: _read_if_present(spark, config, "blocking")
+        ),
         "scores": scores,
-        "score_sample": None if scores is None else sample_score_files(spark, scores),
+        "score_sample": None
+        if scores is None
+        else _try("feature stats", lambda: sample_score_files(spark, scores)),
         "feature_order": _try(
             "feature stats",
             lambda: model_jar.read_feature_order(spark, config.model_jar),
         ),
-        "reference": _try(
-            "reference z-scores",
-            lambda: model_jar.read_reference_dataset(
-                spark, config.model_jar, config.output_path
-            ),
-        ),
+        "reference": _try("reference z-scores", lambda: _reference(spark, config)),
         "previous": _try(
             "previous release z-scores",
             lambda: spark.read.parquet(config.previous_metrics_path),
@@ -240,7 +250,7 @@ def run(spark: SparkSession, config: RunConfig) -> None:
         matched,
         assigned,
         config.provider,
-        **_optional_metric_inputs(spark, config),
+        load_optional=lambda: _optional_metric_inputs(spark, config),
     )
 
 

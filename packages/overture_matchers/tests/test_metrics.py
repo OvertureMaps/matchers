@@ -3,6 +3,8 @@
 import json
 import zipfile
 
+import pytest
+
 from overture_matchers import metrics as shared
 from overture_matchers.places import metrics as places
 from overture_matchers.places import model_jar
@@ -75,6 +77,50 @@ def test_match_type_distribution(spark):
     rows = by_id(places.match_type_distribution(inputs(spark)))
     assert rows[("MatchTypeDistribution", "candidate_baseline")] == 1
     assert rows[("MatchCandidateDuplicates", "")] == 2
+
+
+def test_match_result_breakdown(spark):
+    rows = by_id(shared.match_result_breakdown(inputs(spark)))
+    assert rows[("MatchNewEntityCount", "")] == 1
+    assert rows[("MatchRetainedEntityCount", "")] == 1
+    assert rows[("MatchResurrectedEntityCount", "")] == 0
+    assert rows[("MatchNewProviderRecordCount", "")] == 1
+    assert rows[("MatchReductionCount", "")] == 1
+
+
+def test_cluster_stats(spark):
+    rows = by_id(places.cluster_stats(inputs(spark)))
+    for kind in ("match", "candidates-only", "no-match"):
+        assert rows[("MatchClusterCountByType", kind)] == 1
+    assert rows[("MatchClusterSizeStatsAvg", "")] == 2
+    assert rows[("MatchClusterCandidateSizeStatsMax", "")] == 2
+
+
+def test_cluster_size_by_country(spark):
+    inp = inputs(spark)
+    inp = inp._replace(
+        prepared_candidates=spark.createDataFrame(
+            [("a", "US"), ("b", "CA"), ("c", "CA")], "id string, country string"
+        ),
+        prepared_baseline=spark.createDataFrame(
+            [("B1", "US")], "id string, country string"
+        ),
+    )
+    rows = by_id(places.cluster_size_by_country(inp))
+    assert rows[("MatchClusterStatsByCountryTotal", "US")] == 1
+    assert rows[("MatchClusterStatsByCountryMax", "CA")] == 2
+
+
+def test_gers_uniqueness(spark):
+    inp = inputs(spark)
+    assert places.gers_uniqueness(inp) == [("MatchGERSIdUniquenessCheck", 1.0, "")]
+    dup = inp.results.unionByName(inp.results)
+    assert places.gers_uniqueness(inp._replace(results=dup))[0][1] == 0.0
+
+
+def test_match_rate_without_blocking(spark):
+    rows = by_id(places.match_rate(inputs(spark)))
+    assert rows == {("MatchRateIngest", ""): pytest.approx(100 / 3)}
 
 
 def test_blocking_metrics_need_blocking(spark):

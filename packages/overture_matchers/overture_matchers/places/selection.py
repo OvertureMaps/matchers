@@ -165,6 +165,11 @@ def select_winners(
         ``fallout`` has ``id`` and ``duplicate_of``: each candidate that lost its
         cluster, and the winner it folds into. Clusters with only baseline records
         have no winner.
+
+    Raises:
+        ValueError: A cluster with candidates has no winner. This happens when it
+            mixes baseline and candidate records without a candidate-baseline pair,
+            and its candidates would otherwise be in neither output.
     """
     rows = _flag_clusters(with_base_active(coalesce_schema(matches), baseline))
     by_cluster = (
@@ -173,6 +178,17 @@ def select_winners(
         .unionByName(_best_match_winners(rows))
         .cache()
     )
+    orphans = [
+        r["cluster_id"]
+        for r in _candidate_ids(rows.where(F.col("_kind") == "best_match"))
+        .select("cluster_id")
+        .distinct()
+        .join(by_cluster, "cluster_id", "left_anti")
+        .limit(5)
+        .collect()
+    ]
+    if orphans:
+        raise ValueError(f"clusters without a winner, for example {orphans}")
     fallout = (
         _candidate_ids(rows.where(F.col("_kind") != "baseline_only"))
         .join(

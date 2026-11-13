@@ -164,7 +164,7 @@ def history_match(inp: MetricInputs) -> list[MetricRow]:
     """Candidates that setup matched through history, and their share."""
     total = inp.prepared_candidates.count()
     matched = inp.prepared_candidates.where(F.col("base_ids").isNotNull()).count()
-    rate = round_half_up(percentage(matched, total), 2) if total > 0 else 0.0
+    rate = round_half_up(percentage(matched, total), 2)
     return [
         ("MatchHistoryMatchCount", float(matched), ""),
         ("MatchHistoryMatchRate", rate, ""),
@@ -202,6 +202,8 @@ def to_frame(
     now = datetime.now(UTC)
     unique = {}
     for metric_id, value, sub_partition in rows:
+        if (metric_id, sub_partition) in unique:
+            logger.warning("Dropping duplicate metric %s %r", metric_id, sub_partition)
         unique.setdefault((metric_id, sub_partition), value)
     data = [
         (

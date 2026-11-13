@@ -98,11 +98,16 @@ def test_run_chains_stage_outputs_and_skips_on_rerun(spark, params, monkeypatch)
         calls["assign_ids"] = (matched.matches.count(), provider, output_path)
         return AssignIdsOutput(spark.range(6), spark.range(7))
 
-    def metrics(raw, prepared, matched, ids, provider, **optional) -> MetricsOutput:
-        calls["metrics"] = (ids.final.count(), ids.fallout.count())
+    def metrics(
+        raw, prepared, matched, ids, provider, load_optional=dict
+    ) -> MetricsOutput:
+        calls["metrics"] = (ids.final.count(), ids.fallout.count(), load_optional())
         return MetricsOutput(spark.range(1))
 
-    for fake in (setup, matching, assign_ids, metrics):
+    def _optional_metric_inputs(spark, config):
+        return {"loaded": True}
+
+    for fake in (setup, matching, assign_ids, metrics, _optional_metric_inputs):
         monkeypatch.setattr(job, fake.__name__, fake)
     config = job.RunConfig.from_params(params | {"matchHistory": "false"})
     job.run(spark, config)
@@ -111,7 +116,7 @@ def test_run_chains_stage_outputs_and_skips_on_rerun(spark, params, monkeypatch)
         "setup": (2, False),
         "matching": (3, 4, run),
         "assign_ids": (5, config.provider, run),
-        "metrics": (6, 7),
+        "metrics": (6, 7, {"loaded": True}),
     }
     calls.clear()
     job.run(spark, config)

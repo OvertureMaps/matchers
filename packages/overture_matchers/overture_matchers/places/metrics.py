@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import random
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from pyspark.sql import functions as F
@@ -17,11 +18,16 @@ from overture_matchers.metrics import (
     percentage,
     round_half_up,
 )
+from overture_matchers.places.selection import (
+    BASELINE_BASELINE,
+    CANDIDATE,
+    CANDIDATE_CANDIDATE,
+    NOMATCH,
+)
 
 if TYPE_CHECKING:
     from pyspark.sql import DataFrame, SparkSession
 
-CANDIDATE = "candidate"
 # Sampled score files stop once they add up to this many bytes.
 SAMPLE_BYTES = 200 * 1024 * 1024
 SAMPLE_SEED = 42
@@ -68,10 +74,10 @@ def match_type_distribution(inp: MetricInputs) -> list[MetricRow]:
         inp.matches.groupBy("match_sub_type").agg(F.count("id").alias("n")).collect()
     )
     candidate_dups = _distinct_ids(
-        inp.matches.where(F.col("match_sub_type") == "candidate_candidate")
+        inp.matches.where(F.col("match_sub_type") == CANDIDATE_CANDIDATE)
     )
     baseline_dups = _distinct_ids(
-        inp.matches.where(F.col("match_sub_type") == "baseline_baseline")
+        inp.matches.where(F.col("match_sub_type") == BASELINE_BASELINE)
     )
     return [
         ("MatchTypeDistribution", float(r["n"]), r["match_sub_type"] or "")
@@ -112,9 +118,9 @@ def clusters(matches: DataFrame) -> DataFrame:
     return (
         matches.groupBy("cluster_id")
         .agg(
-            F.when(all_of("baseline_baseline"), "baseline-only")
-            .when(all_of("candidate_candidate"), "candidates-only")
-            .when(all_of("nomatch"), "no-match")
+            F.when(all_of(BASELINE_BASELINE), "baseline-only")
+            .when(all_of(CANDIDATE_CANDIDATE), "candidates-only")
+            .when(all_of(NOMATCH), "no-match")
             .otherwise("match")
             .alias("type"),
             F.array_distinct(F.flatten(F.collect_list(F.array("id", "base_id")))).alias(
@@ -134,7 +140,13 @@ def clusters(matches: DataFrame) -> DataFrame:
     )
 
 
-def _size_stats(df: DataFrame, column: str) -> list[F.Column]:
+# simplification: keeps the last matches table's clusters cached until the next call.
+@lru_cache(maxsize=1)
+def _cached_clusters(matches: DataFrame) -> DataFrame:
+    return clusters(matches).cache()
+
+
+def _size_stats(column: str) -> list[F.Column]:
     c = F.col(column)
     return [
         _pct(column, 0.99).alias("p99"),
@@ -162,14 +174,14 @@ CLUSTER_SIZE_SUFFIXES = {
 
 def cluster_stats(inp: MetricInputs) -> list[MetricRow]:
     """Clusters by type, singleton rate, duplicated IDs and cluster size profiles."""
-    cl = clusters(inp.matches).cache()
+    cl = _cached_clusters(inp.matches)
     by_type = {
         r["type"]: r["n"]
         for r in cl.groupBy("type").agg(F.count(F.lit(1)).alias("n")).collect()
     }
     relevant = cl.where(F.col("type").isin("match", "candidates-only"))
-    sizes = relevant.agg(*_size_stats(relevant, "entity_count")).first()
-    candidate_sizes = relevant.agg(*_size_stats(relevant, "candidate_count")).first()
+    sizes = relevant.agg(*_size_stats("entity_count")).first()
+    candidate_sizes = relevant.agg(*_size_stats("candidate_count")).first()
     duplicated = cl.where(F.col("entity_count") - F.col("candidate_count") > 1).count()
     rows: list[MetricRow] = [
         ("MatchClusterCountByType", float(n), t) for t, n in by_type.items()
@@ -190,11 +202,15 @@ def cluster_stats(inp: MetricInputs) -> list[MetricRow]:
 
 
 def cluster_size_by_country(inp: MetricInputs) -> list[MetricRow]:
-    """Candidate count per cluster, profiled by the country of the cluster's first ID."""
+    """Candidate count per cluster, profiled by the country of the cluster's smallest ID.
+
+    An ID in both candidates and baseline has two country rows, so its cluster is
+    counted once per row.
+    """
     countries = inp.prepared_candidates.select("id", "country").unionByName(
         inp.prepared_baseline.select("id", "country")
     )
-    relevant = clusters(inp.matches).where(
+    relevant = _cached_clusters(inp.matches).where(
         F.col("type").isin("match", "candidates-only")
     )
     stats = (
@@ -310,7 +326,7 @@ def match_rate(inp: MetricInputs) -> list[MetricRow]:
     candidates = inp.prepared_candidates.count()
     history = inp.prepared_candidates.where(F.col("base_ids").isNotNull()).count()
     matched = (
-        clusters(inp.matches)
+        _cached_clusters(inp.matches)
         .where(F.col("type") == "match")
         .select(F.explode("candidate_ids").alias("id"))
         .distinct()
