@@ -39,6 +39,15 @@ def read_output(
     return spark.read.parquet(output_uri(output_path, name, feature_type))
 
 
+def read_output_if_present(
+    spark: SparkSession, output_path: str, name: str, feature_type: str
+) -> DataFrame | None:
+    """Read an output folder, or None if it has no files."""
+    if not list_files(spark, output_uri(output_path, name, feature_type)):
+        return None
+    return read_output(spark, output_path, name, feature_type)
+
+
 def _marker_uri(output_path: str, stage: str, feature_type: str) -> str:
     return run_uri(output_path, MARKER_DIR, stage, f"type={feature_type}")
 
