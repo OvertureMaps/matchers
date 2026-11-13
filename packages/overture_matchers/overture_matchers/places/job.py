@@ -11,7 +11,6 @@ import logging
 import sys
 from typing import TYPE_CHECKING
 
-from overture_spark.hadoop_fs import list_files
 from overture_spark.job import SparkSedonaJob
 from pyspark import StorageLevel
 
@@ -29,8 +28,7 @@ from overture_matchers.core.stages import (
 )
 from overture_matchers.metrics import MetricInputs, to_frame
 from overture_matchers.metrics import compute as compute_metrics
-from overture_matchers.places import model_jar
-from overture_matchers.places.metrics import METRICS, sample_score_files
+from overture_matchers.places.metrics import METRICS, load_optional_inputs
 from overture_matchers.places.prepare import (
     add_base_ids,
     baseline_provider_column,
@@ -47,7 +45,7 @@ from overture_matchers.places.selection import select_winners
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from pyspark.sql import DataFrame, SparkSession
+    from pyspark.sql import SparkSession
 
 logger = logging.getLogger(__name__)
 
@@ -146,63 +144,6 @@ def metrics(
     return MetricsOutput(to_frame(spark, rows, THEME, FEATURE_TYPE, provider))
 
 
-def _read_if_present(
-    spark: SparkSession, config: RunConfig, name: str
-) -> DataFrame | None:
-    uri = io.output_uri(config.output_path, name, FEATURE_TYPE)
-    return (
-        io.read_output(spark, config.output_path, name, FEATURE_TYPE)
-        if list_files(spark, uri)
-        else None
-    )
-
-
-def _try(description: str, load):
-    """The result of ``load()``, or None, with a warning, if it raises."""
-    try:
-        return load()
-    except Exception:
-        logger.exception("Skipping %s", description)
-        return None
-
-
-def _reference(spark: SparkSession, config: RunConfig) -> DataFrame | None:
-    reference = model_jar.read_reference_dataset(
-        spark, config.model_jar, config.output_path
-    )
-    if reference is None:
-        logger.warning("The model jar has no reference dataset; skipping z-scores")
-    return reference
-
-
-def _optional_metric_inputs(
-    spark: SparkSession, config: RunConfig
-) -> dict[str, object]:
-    """Load the metric inputs that a run may lack. Anything missing is left out."""
-    scores = _try("score metrics", lambda: _read_if_present(spark, config, "scores"))
-    found = {
-        "blocking": _try(
-            "blocking metrics", lambda: _read_if_present(spark, config, "blocking")
-        ),
-        "scores": scores,
-        "score_sample": None
-        if scores is None
-        else _try("feature stats", lambda: sample_score_files(spark, scores)),
-        "feature_order": _try(
-            "feature stats",
-            lambda: model_jar.read_feature_order(spark, config.model_jar),
-        ),
-        "reference": _try("reference z-scores", lambda: _reference(spark, config)),
-        "previous": _try(
-            "previous release z-scores",
-            lambda: spark.read.parquet(config.previous_metrics_path),
-        )
-        if config.previous_metrics_path
-        else None,
-    }
-    return {k: v for k, v in found.items() if v is not None}
-
-
 def run(spark: SparkSession, config: RunConfig) -> None:
     """Run the places stages, skipping completed ones."""
     if FEATURE_TYPE not in config.input or FEATURE_TYPE not in config.baseline:
@@ -250,7 +191,7 @@ def run(spark: SparkSession, config: RunConfig) -> None:
         matched,
         assigned,
         config.provider,
-        load_optional=lambda: _optional_metric_inputs(spark, config),
+        load_optional=lambda: load_optional_inputs(spark, config, FEATURE_TYPE),
     )
 
 
