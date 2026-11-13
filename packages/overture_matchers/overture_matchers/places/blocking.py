@@ -61,7 +61,8 @@ def shuffle_partition_count(spark: SparkSession) -> int:
     return int(spark.conf.get(SHUFFLE_PARTITIONS_CONF, DEFAULT_SHUFFLE_PARTITIONS))
 
 
-def _by_pair_key(df: DataFrame, partitions: int) -> DataFrame:
+def by_pair_key(df: DataFrame, partitions: int) -> DataFrame:
+    """``df`` hash partitioned on both sides' ``id`` and ``provider``."""
     return df.repartition(
         partitions, F.expr("xxhash64(id, provider, base_id, base_provider)")
     )
@@ -140,7 +141,7 @@ def prune(
         "id", "provider", "base_id", "base_provider", score(columns).alias("score")
     )
     survivors = keys.filter(F.col("score") >= model.blocking_threshold).drop("score")
-    return _by_pair_key(survivors, partitions)
+    return by_pair_key(survivors, partitions)
 
 
 def blocking_pairs(
@@ -211,4 +212,4 @@ def blocking_pairs(
             *[F.col(f"left.{c}") for c in output],
         )
     )
-    return _by_pair_key(joined, shuffle_partitions)
+    return by_pair_key(joined, shuffle_partitions)

@@ -82,17 +82,22 @@ CONFIG = {
 }
 
 
-@pytest.fixture(scope="session")
-def jar(spark, tmp_path_factory):
-    """A jar holding a blocking booster that keeps pairs with similar names."""
-    rng = np.random.default_rng(0)
-    x = rng.random((400, 3)) * [2.0, 1.0, 400.0]
-    y = (x[:, 1] > 0.5).astype(int)
+def train_booster(x, y):
+    """A tiny binary booster saved as JSON."""
     booster = xgboost.train(
         {"objective": "binary:logistic", "max_depth": 2},
         xgboost.DMatrix(x, label=y),
         num_boost_round=10,
     )
+    return bytes(booster.save_raw(raw_format="json"))
+
+
+@pytest.fixture(scope="session")
+def jar(spark, tmp_path_factory):
+    """A jar holding a blocking booster that keeps pairs with similar names."""
+    rng = np.random.default_rng(0)
+    x = rng.random((400, 3)) * [2.0, 1.0, 400.0]
+    booster = train_booster(x, (x[:, 1] > 0.5).astype(int))
     words = spark.createDataFrame(
         [(w,) for w, n in SKETCH.items() for _ in range(n)], ["word"]
     )
@@ -106,9 +111,6 @@ def jar(spark, tmp_path_factory):
             "places_matcher_model/metadata/blocking_config",
             json.dumps(CONFIG),
         )
-        z.writestr(
-            "places_matcher_model/data/blocking_model",
-            bytes(booster.save_raw(raw_format="json")),
-        )
+        z.writestr("places_matcher_model/data/blocking_model", booster)
         z.writestr("config/places/cms-names.parquet", out.getvalue())
     return str(path)

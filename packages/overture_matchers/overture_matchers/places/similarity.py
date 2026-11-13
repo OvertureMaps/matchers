@@ -10,6 +10,7 @@ the Basic Multilingual Plane, such as emoji.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
+from functools import lru_cache
 
 from rapidfuzz.distance import Levenshtein
 
@@ -42,11 +43,7 @@ def normalized_similarity(left: str | None, right: str | None) -> float:
     return 1.0 - Levenshtein.distance(a, b) / longest
 
 
-def prefix_score(left: str | None, right: str | None) -> float:
-    """Shared prefix length over the shorter length, or 0.0 if either is null or empty."""
-    if not left or not right:
-        return 0.0
-    a, b = _comparable(left, right)
+def _shared_prefix_ratio(a: Sequence, b: Sequence) -> float:
     shortest = min(len(a), len(b))
     shared = 0
     while shared < shortest and a[shared] == b[shared]:
@@ -54,13 +51,23 @@ def prefix_score(left: str | None, right: str | None) -> float:
     return shared / shortest
 
 
-def suffix_score(left: str | None, right: str | None) -> float:
-    """``prefix_score`` of the strings reversed by code point."""
+def prefix_score(left: str | None, right: str | None) -> float:
+    """Shared prefix length over the shorter length, or 0.0 if either is null or empty."""
     if not left or not right:
         return 0.0
-    return prefix_score(left[::-1], right[::-1])
+    return _shared_prefix_ratio(*_comparable(left, right))
 
 
+def suffix_score(left: str | None, right: str | None) -> float:
+    """``prefix_score`` of the strings reversed by UTF-16 unit."""
+    if not left or not right:
+        return 0.0
+    a, b = _comparable(left, right)
+    return _shared_prefix_ratio(a[::-1], b[::-1])
+
+
+# simplification: a per-process memo of token comparisons, bounded by its size.
+@lru_cache(maxsize=1 << 16)
 def _similar(a: str | None, b: str | None) -> bool:
     return normalized_similarity(a, b) >= TOKEN_THRESHOLD
 

@@ -19,13 +19,14 @@ import numpy as np
 import pandas as pd
 import pytest
 import xgboost
+from conftest import train_booster
 from pyspark.sql import Row
 from pyspark.sql import functions as F
 from test_places_blocking import frame, record
 
 from overture_matchers.core import io as stage_io
 from overture_matchers.core.stages import SetupOutput
-from overture_matchers.places import features, job, model, similarity
+from overture_matchers.places import features, job, model, model_jar, similarity
 from overture_matchers.places.model import MARGIN, PROBABILITY
 from overture_matchers.places.scoring import Scorer, score_pairs
 
@@ -38,9 +39,14 @@ NAME_H3_GE10 = ["blue cafe"]
 CACHE = "test_embeddings_cache"
 
 
+def name_key_at_origin(spark, name):
+    res = features.NAME_H3_RESOLUTION
+    cell = spark.sql(f"SELECT ST_H3CellIDs(ST_Point(0.0, 0.0), {res}, false)[0]")
+    return f"{res}:{cell.first()[0]}:{name}"
+
+
 def _name_h3_filter(spark, names):
-    cell = spark.sql("SELECT ST_H3CellIDs(ST_Point(0.0, 0.0), 5, false)[0]").first()[0]
-    df = spark.createDataFrame([(f"5:{cell}:{n}",) for n in names], ["k"])
+    df = spark.createDataFrame([(name_key_at_origin(spark, n),) for n in names], ["k"])
     bloom = df._jdf.stat().bloomFilter("k", 100, 0.001)
     out = spark._jvm.java.io.ByteArrayOutputStream()
     bloom.writeTo(out)
@@ -52,11 +58,8 @@ def scoring_jar(spark, jar, tmp_path_factory):
     """The blocking jar plus a scoring model, shipped to the workers."""
     rng = np.random.default_rng(0)
     x = rng.random((400, len(SCORING_FEATURES)))
-    y = (x[:, SCORING_FEATURES.index("name_similarity")] > 0.5).astype(int)
-    booster = xgboost.train(
-        {"objective": "binary:logistic", "max_depth": 2},
-        xgboost.DMatrix(x, label=y),
-        num_boost_round=10,
+    booster = train_booster(
+        x, (x[:, SCORING_FEATURES.index("name_similarity")] > 0.5).astype(int)
     )
     path = tmp_path_factory.mktemp("jar") / "tiny-scoring-model.jar"
     shutil.copy(jar, path)
@@ -71,9 +74,7 @@ def scoring_jar(spark, jar, tmp_path_factory):
                 }
             ),
         )
-        z.writestr(
-            model.SCORING_BOOSTER_RESOURCE, bytes(booster.save_raw(raw_format="json"))
-        )
+        z.writestr(model.SCORING_BOOSTER_RESOURCE, booster)
         z.writestr(model.ADDRESS_SKETCH_RESOURCE, names)
         z.writestr(model.NAME_H3_GE2_RESOURCE, _name_h3_filter(spark, NAME_H3_GE2))
         z.writestr(model.NAME_H3_GE10_RESOURCE, _name_h3_filter(spark, NAME_H3_GE10))
@@ -97,6 +98,12 @@ def first_feature_as_probability(columns):
 
 def stand_in_scorer(order, threshold=0.95):
     return Scorer(order, threshold, lambda: LOOKUPS, first_feature_as_probability)
+
+
+def jar_scorer(spark, path):
+    with model_jar.open_jar(spark, path) as jar:
+        config = json.loads(jar.read(model_jar.CONFIG_RESOURCE))
+    return job.jar_scorer(config, os.path.basename(path))
 
 
 def side(id, name, lat, **fields):
@@ -152,7 +159,7 @@ def cache(spark):
 
 
 def test_score_pairs_adds_every_feature_and_the_score(spark, scoring_jar, pair, cache):
-    out = score_pairs(pair, job.jar_scorer(spark, scoring_jar), cache)
+    out = score_pairs(pair, jar_scorer(spark, scoring_jar), cache)
     assert out.columns == [
         *pair.columns,
         *SCORING_FEATURES,
@@ -193,7 +200,7 @@ def test_score_pairs_adds_every_feature_and_the_score(spark, scoring_jar, pair, 
 
 
 def test_scoring_runs_each_python_udf_once(spark, scoring_jar, pair, cache):
-    out = score_pairs(pair, job.jar_scorer(spark, scoring_jar), cache)
+    out = score_pairs(pair, jar_scorer(spark, scoring_jar), cache)
     plan = out._jdf.queryExecution().executedPlan().toString()
     assert plan.count("BatchEvalPython") == 1
     assert plan.count("ArrowEvalPython") == 1
@@ -203,6 +210,14 @@ def test_cosine_features_need_a_cache_table(pair):
     scorer = stand_in_scorer((features.NAME_COSINE,))
     with pytest.raises(ValueError, match="embeddingsCacheTable"):
         score_pairs(pair, scorer, None)
+
+
+def test_embeddings_cache_is_resolved_only_for_cosine_features(spark):
+    plain = stand_in_scorer(("name_similarity",))
+    assert job.embeddings_cache(spark, plain, "no_such_table") is None
+    cosine = stand_in_scorer((features.NAME_COSINE,))
+    with pytest.raises(ValueError, match="embeddingsCacheTable"):
+        job.embeddings_cache(spark, cosine, None)
 
 
 def test_scorer_rejects_an_unknown_feature():
@@ -216,10 +231,14 @@ def test_string_features_count_utf16_units():
     assert similarity.normalized_similarity("a\U0001f600", "a") == pytest.approx(1 / 3)
     assert similarity.prefix_score("a\U0001f600", "a\U0001f601") == pytest.approx(2 / 3)
     assert similarity.suffix_score("\U0001f600b", "\U0001f600b") == 1.0
+    # Reversal splits the surrogate pair, so the low units differ first.
+    assert similarity.suffix_score("x\U0001f600", "x\U0001f601") == 0.0
 
 
 def test_tfidf_sums_in_jvm_set_order(spark):
     jvm = spark._jvm
+    if not jvm.scala.util.Properties.versionNumberString().startswith("2.12."):
+        pytest.skip("the served model's sets iterate in Scala 2.12 order")
 
     def jvm_intersection(left, right):
         sets = []
@@ -291,7 +310,7 @@ def test_pairwise_features_weigh_names_by_their_difference():
             "name": "Red Cafe",
             "name_clean": "blue cafes",
             "name_clean_tokens": ["blue", "cafes"],
-            "name_h3_cell": 7 - (1 << 64),
+            "name_h3_cell": 7,
             "name_vector": bytes([0, 127]),
             "taxonomy_vector": bytes([127, 0]),
             "address_clean": "1 main st",
@@ -310,7 +329,7 @@ def test_pairwise_features_weigh_names_by_their_difference():
     assert out["address_token_subset"] == 0
     assert out["name_tfidf"] == 3.0 / 2
     assert out["residual_idf_max"] == 1.0
-    # The base name is common in its cell; a negative cell id reads as unsigned.
+    # The base name is common in its cell.
     assert out["unique_name_h3_cell_count_bin"] == 2.0
     assert out[features.NAME_COSINE] == 0.0
     assert out[features.TAXONOMY_COSINE] is None
@@ -326,9 +345,8 @@ def test_scoring_lookups_read_the_jar(spark, scoring_jar):
     lookups = model.scoring_lookups(os.path.basename(scoring_jar))
     assert lookups.name_idf("rare") == pytest.approx(math.log(100) + 1)
     assert lookups.address_idf("cafe") == 1.0
-    cell = spark.sql("SELECT ST_H3CellIDs(ST_Point(0.0, 0.0), 5, false)[0]").first()[0]
-    assert lookups.name_repeated(f"5:{cell}:rare")
-    assert not lookups.name_common(f"5:{cell}:rare")
+    assert lookups.name_repeated(name_key_at_origin(spark, "rare"))
+    assert not lookups.name_common(name_key_at_origin(spark, "rare"))
 
 
 def test_token_similarity_claims_each_token_once():

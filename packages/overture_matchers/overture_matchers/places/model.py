@@ -2,8 +2,7 @@
 # Copyright (c) 2026 by the Overture Maps Foundation
 """The places model: settings read from the model jar, and the engines workers run.
 
-The driver reads the blocking settings once into ``PlacesModel`` and the
-scoring config with ``read_scoring_config``. The engine functions return
+The driver reads the blocking settings once into ``PlacesModel``. The engine functions return
 ``Column`` callables or lookups that read the boosters, sketches and Bloom
 filters out of the jar ``sc.addFile`` shipped to workers, once per process.
 """
@@ -31,7 +30,7 @@ from pyspark.sql.types import (
 )
 
 from overture_matchers.places import features
-from overture_matchers.places.model_jar import CONFIG_RESOURCE, open_jar
+from overture_matchers.places.model_jar import open_jar
 from overture_matchers.sketches import BloomFilter, CountMinSketch
 
 if TYPE_CHECKING:
@@ -66,13 +65,16 @@ class PlacesModel:
     @classmethod
     def load(cls, spark: SparkSession, model_jar: str) -> PlacesModel:
         """Read the settings from ``model_jar`` and check its booster's XGBoost version."""
+        with open_jar(spark, model_jar) as jar:
+            return cls.from_jar(jar)
+
+    @classmethod
+    def from_jar(cls, jar: zipfile.ZipFile) -> PlacesModel:
+        """Read the settings from an open jar and check its booster's XGBoost version."""
         import xgboost
 
-        with open_jar(spark, model_jar) as jar:
-            check_xgboost_version(
-                jar.read(BLOCKING_BOOSTER_RESOURCE), xgboost.__version__
-            )
-            return cls.from_config(json.loads(jar.read(BLOCKING_CONFIG_RESOURCE)))
+        check_xgboost_version(jar.read(BLOCKING_BOOSTER_RESOURCE), xgboost.__version__)
+        return cls.from_config(json.loads(jar.read(BLOCKING_CONFIG_RESOURCE)))
 
     @classmethod
     def from_config(cls, config: dict) -> PlacesModel:
@@ -94,12 +96,6 @@ class PlacesModel:
             blocking_threshold=float(config["prediction_threshold"]),
             blocking_radius_m=float(config["spatial_radius_m"]),
         )
-
-
-def read_scoring_config(spark: SparkSession, model_jar: str) -> dict:
-    """The jar's parsed scoring config."""
-    with open_jar(spark, model_jar) as jar:
-        return json.loads(jar.read(CONFIG_RESOURCE))
 
 
 def _read_resource(resource: str, jar_name: str) -> bytes:

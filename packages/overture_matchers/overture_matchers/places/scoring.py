@@ -64,6 +64,16 @@ class Scorer:
             )
         return cls(order, float(config["prediction_threshold"]), lookups, predict)
 
+    @property
+    def needs_embeddings(self) -> bool:
+        """Whether a cosine feature reads the embeddings cache."""
+        return not {features.NAME_COSINE, features.TAXONOMY_COSINE}.isdisjoint(
+            self.feature_order
+        )
+
+
+MISSING_CACHE = "the model's cosine features need the embeddingsCacheTable param"
+
 
 # The cache row of an embedding: a SHA-256 of the normalized text, keyed by field type.
 CACHE_FIELD_TYPE = "field_type"
@@ -116,9 +126,7 @@ def _with_embeddings(
                 pairs = pairs.withColumn(prefix + vector, F.lit(None).cast("binary"))
         return pairs
     if cache is None:
-        raise ValueError(
-            "the model's cosine features need the embeddingsCacheTable param"
-        )
+        raise ValueError(MISSING_CACHE)
     for vector, text, field_type, normalize in _EMBEDDINGS:
         hashes = {p: f"_{p}{vector}_hash" for p in ("", "base_")}
         for prefix, hash_col in hashes.items():
@@ -131,7 +139,8 @@ def _with_embeddings(
             .filter(F.col("hash").isNotNull())
             .distinct()
         )
-        # One vector per hash, so a cache holding a hash twice cannot duplicate pairs.
+        # One vector per hash, so a cache holding a hash twice cannot duplicate
+        # pairs. The smallest vector wins, so reruns agree.
         embeddings = (
             cache.filter(F.col(CACHE_FIELD_TYPE) == field_type)
             .select(
@@ -139,7 +148,8 @@ def _with_embeddings(
                 F.col(CACHE_VECTOR).cast("binary").alias("vector"),
             )
             .join(needed_hashes, "hash")
-            .dropDuplicates(["hash"])
+            .groupBy("hash")
+            .agg(F.min("vector").alias("vector"))
         )
         if field_type == "taxonomy":
             embeddings = F.broadcast(embeddings)
@@ -172,10 +182,9 @@ def score_pairs(
         ``composite_score`` (the match probability).
     """
     order = scorer.feature_order
-    cosine = {features.NAME_COSINE, features.TAXONOMY_COSINE} & set(order)
     pairwise = "_pairwise"
     scored = (
-        _with_embeddings(pairs, embeddings, bool(cosine))
+        _with_embeddings(pairs, embeddings, scorer.needs_embeddings)
         .withColumn(features.NAME_H3_CELL, _h3_cell(""))
         .withColumn(f"base_{features.NAME_H3_CELL}", _h3_cell("base_"))
         .withColumn(pairwise, features.pairwise_features(scorer.lookups))
@@ -191,13 +200,13 @@ def score_pairs(
     scored = scored.select(
         *[c for c in pairs.columns if c not in order], *feature_columns
     )
-    output = scorer.predict([F.col(name) for name in order])
-    margin = F.col(f"{pairwise}.{MARGIN}")
-    probability = F.col(f"{pairwise}.{PROBABILITY}")
+    output = "_model_output"
+    margin = F.col(f"{output}.{MARGIN}")
+    probability = F.col(f"{output}.{PROBABILITY}")
     nan = F.lit(float("nan"))
     feature_values = [F.coalesce(F.col(name).cast("double"), nan) for name in order]
     return (
-        scored.withColumn(pairwise, output)
+        scored.withColumn(output, scorer.predict([F.col(name) for name in order]))
         .withColumn("features", array_to_vector(F.array(*feature_values)))
         .withColumn("rawPrediction", array_to_vector(F.array(-margin, margin)))
         .withColumn(
@@ -206,5 +215,5 @@ def score_pairs(
         )
         .withColumn("prediction", (probability >= scorer.threshold).cast("int"))
         .withColumn("composite_score", probability)
-        .drop(pairwise)
+        .drop(output)
     )

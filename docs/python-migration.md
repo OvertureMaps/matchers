@@ -518,6 +518,8 @@ Harness layout: `parity/` sits outside `packages/`, so nothing in it ships to Py
 8. Scala never loads the baseline's soft deletes. `JobUtils.loadInput` tries to union the `_deletes` table, but it reads `loadedData(table)` before assigning it, so the lookup throws and the `catch` returns the active data. Read the baseline like the input. Decide separately whether to add soft deletes.
 9. Boolean params: for a value it doesn't recognize, such as `"yes"`, Scala's `runtimeBooleanOverride` keeps the config's value. `RunConfig` raises instead. An argument set that Scala accepted can therefore fail here.
 10. Lowercasing: the name keys for the name/H3 Bloom filter use Python's `str.lower`, and Java 17's `toLowerCase(Locale.ROOT)` differs in two ways. Java turns a capital sigma into final sigma (ς) under a looser rule, for example after a digit or punctuation. Its older Unicode tables also leave 40 newer capitals unchanged. A differing key misses the filter and changes `unique_name_h3_cell_count_bin`. We accept this difference.
+11. Embeddings cache duplicates: Scala deduplicates hashes for a parquet cache but not for a table, so a hash stored twice in the table duplicates every pair that uses it. Scoring keeps one vector per hash, the smallest, so each pair appears once and reruns agree.
+12. Null token lists and URLs: Scala's scoring features throw on them. Scoring treats them as empty. Prepared data never has these nulls.
 
 ### tf-data-platform DAG changes
 

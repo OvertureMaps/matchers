@@ -7,6 +7,7 @@ Run locally with ``python -m overture_matchers.places.job <params.json>``.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -34,6 +35,7 @@ from overture_matchers.metrics import compute as compute_metrics
 from overture_matchers.places.blocking import (
     SPATIAL_JOIN_CONF,
     blocking_pairs,
+    by_pair_key,
     shuffle_partition_count,
 )
 from overture_matchers.places.metric_inputs import load_optional_inputs
@@ -45,9 +47,9 @@ from overture_matchers.places.model import (
     margin_and_probability_udf,
     name_idf_udf,
     predict_udf,
-    read_scoring_config,
     scoring_lookups,
 )
+from overture_matchers.places.model_jar import CONFIG_RESOURCE, open_jar
 from overture_matchers.places.prepare import (
     add_base_ids,
     baseline_provider_column,
@@ -59,13 +61,13 @@ from overture_matchers.places.runtime import (
     register_text_udfs,
     ship_model_and_libpostal_data_to_workers,
 )
-from overture_matchers.places.scoring import Scorer, score_pairs
+from overture_matchers.places.scoring import MISSING_CACHE, Scorer, score_pairs
 from overture_matchers.places.selection import select_winners
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from pyspark.sql import SparkSession
+    from pyspark.sql import DataFrame, SparkSession
 
 logger = logging.getLogger(__name__)
 
@@ -121,14 +123,28 @@ def shipped_name(model_jar: str) -> str:
     return os.path.basename(model_jar.rstrip("/"))
 
 
-def jar_scorer(spark: SparkSession, model_jar: str) -> Scorer:
-    """The scoring model, with lookups and booster read from the shipped jar."""
-    jar_name = shipped_name(model_jar)
+def jar_scorer(config: dict, jar_name: str) -> Scorer:
+    """The scorer of the jar's parsed scoring ``config``, reading the shipped jar."""
     return Scorer.from_config(
-        read_scoring_config(spark, model_jar),
+        config,
         lookups=partial(scoring_lookups, jar_name),
         predict=margin_and_probability_udf(jar_name, SCORING_BOOSTER_RESOURCE),
     )
+
+
+def embeddings_cache(
+    spark: SparkSession, scorer: Scorer, table: str | None
+) -> DataFrame | None:
+    """The embeddings cache ``table`` if ``scorer`` reads it, else None.
+
+    Raises:
+        ValueError: The scorer reads the cache, but ``table`` is None.
+    """
+    if not scorer.needs_embeddings:
+        return None
+    if table is None:
+        raise ValueError(MISSING_CACHE)
+    return spark.table(table)
 
 
 def matching(
@@ -145,13 +161,16 @@ def matching(
             the workers here, because a resumed run skips ``setup``.
         output_path: Run directory that receives the ``blocking`` and
             ``scores`` checkpoints.
-        embeddings_cache_table: Table of name and taxonomy embeddings.
+        embeddings_cache_table: Table of name and taxonomy embeddings. It is
+            resolved before blocking, and only if the model has a cosine feature.
     """
     spark = prepared.candidates.sparkSession
     spark.sparkContext.addFile(model_jar)
-    model = PlacesModel.load(spark, model_jar)
-    scorer = jar_scorer(spark, model_jar)
     jar_name = shipped_name(model_jar)
+    with open_jar(spark, model_jar) as jar:
+        model = PlacesModel.from_jar(jar)
+        scorer = jar_scorer(json.loads(jar.read(CONFIG_RESOURCE)), jar_name)
+    embeddings = embeddings_cache(spark, scorer, embeddings_cache_table)
     to_block = prepared.candidates.filter(F.col("base_ids").isNull()).drop("base_ids")
     blocked = io.checkpoint(
         blocking_pairs(
@@ -165,10 +184,9 @@ def matching(
         "blocking",
         FEATURE_TYPE,
     )
-    embeddings = spark.table(embeddings_cache_table) if embeddings_cache_table else None
     scores = io.checkpoint(
-        score_pairs(blocked, scorer, embeddings).repartition(
-            shuffle_partition_count(spark), F.xxhash64("id", "base_id")
+        by_pair_key(
+            score_pairs(blocked, scorer, embeddings), shuffle_partition_count(spark)
         ),
         output_path,
         "scores",
