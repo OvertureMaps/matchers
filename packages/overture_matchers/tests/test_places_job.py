@@ -15,7 +15,6 @@ from overture_matchers.core.stages import (
     SetupOutput,
 )
 from overture_matchers.places import job
-from overture_matchers.places.blocking import SPATIAL_JOIN_CONF
 
 
 def test_output_names_match_scala_postfixes_and_are_unique():
@@ -43,8 +42,8 @@ def params(spark, tmp_path):
 
 
 @pytest.fixture
-def restore_spatial_join_conf(spark):
-    saved = {key: spark.conf.get(key, None) for key in SPATIAL_JOIN_CONF}
+def restore_job_conf(spark):
+    saved = {key: spark.conf.get(key, None) for key in job.JOB_CONF}
     yield
     for key, value in saved.items():
         if value is None:
@@ -54,7 +53,7 @@ def restore_spatial_join_conf(spark):
 
 
 @pytest.fixture
-def stub_stages(spark, monkeypatch, restore_spatial_join_conf):
+def stub_stages(spark, monkeypatch, restore_job_conf):
     def setup(
         raw,
         provider,
@@ -74,13 +73,14 @@ def stub_stages(spark, monkeypatch, restore_spatial_join_conf):
 def test_job_writes_config_then_stops_at_first_stub(
     spark, tmp_path, params, stub_stages
 ):
+    spark.conf.set("spark.sql.adaptive.enabled", "true")
     runner = job.PlacesMatchingJob()
     runner.spark = spark
     result = runner.run(params)
     assert isinstance(result.exception, NotImplementedError)
     assert (tmp_path / "run" / "config.json").is_file()
     assert "/run/checkpoints/" in spark.sparkContext.getCheckpointDir()
-    assert spark.conf.get("spark.sql.adaptive.enabled") == "false"
+    assert {k: spark.conf.get(k) for k in job.JOB_CONF} == job.JOB_CONF
     assert "matching" in str(result.exception)
     assert not (tmp_path / "run" / "_completed_stages" / "matching").exists()
 
@@ -98,7 +98,7 @@ def test_run_rejects_a_missing_model_jar(spark, params):
 
 
 def test_run_chains_stage_outputs_and_skips_on_rerun(
-    spark, params, monkeypatch, restore_spatial_join_conf
+    spark, params, monkeypatch, restore_job_conf
 ):
     calls = {}
 
