@@ -19,6 +19,7 @@ from pyspark import StorageLevel
 from pyspark.sql import functions as F
 
 from overture_matchers import ids
+from overture_matchers.clustering import CONNECTED_COMPONENTS_CONF
 from overture_matchers.core import io
 from overture_matchers.core.config import RunConfig
 from overture_matchers.core.local import run_local
@@ -202,6 +203,9 @@ def matching(
         validated = io.checkpoint(
             validated, output_path, "matches_validated", FEATURE_TYPE
         )
+    else:
+        # Clustering and the NO_MATCH rows both read the accepted pairs.
+        validated = validated.persist(StorageLevel.MEMORY_AND_DISK)
     return MatchingOutput(match_results(validated, prepared.candidates))
 
 
@@ -257,7 +261,7 @@ def run(spark: SparkSession, config: RunConfig) -> None:
     # GraphFrames connected components needs a checkpoint directory.
     spark.sparkContext.setCheckpointDir(io.run_uri(config.output_path, "checkpoints"))
     # Set once for the whole job, so fresh and resumed runs plan stages alike.
-    for key, value in SPATIAL_JOIN_CONF.items():
+    for key, value in {**SPATIAL_JOIN_CONF, **CONNECTED_COMPONENTS_CONF}.items():
         spark.conf.set(key, value)
     raw = RawInputs(
         spark.read.parquet(*config.input[FEATURE_TYPE]),

@@ -80,7 +80,7 @@ class RunConfig:
         baseline_provider: Provider to stamp on a baseline that has no
             ``provider`` column, such as a Places release. Places only.
         match_history: Whether candidates with history matches skip scoring.
-        output_debug: Whether stages also write their debug outputs.
+        output_debug: Whether matching also writes ``matches_validated``.
         model_jar: The ``places-matcher-model`` jar. Only places reads it.
     """
 

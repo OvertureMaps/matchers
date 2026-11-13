@@ -16,10 +16,10 @@ def test_sedona_functions_blocking_uses(spark):
     assert len(row.cells) == 1
 
 
-def test_graphframes_connected_components(spark, tmp_path):
-    spark.sparkContext.setCheckpointDir(str(tmp_path))
-    spark.conf.set("spark.sql.adaptive.enabled", "true")
-    edges = spark.createDataFrame([("a", "b"), ("b", "c"), ("d", "e")], ["src", "dst"])
+def test_graphframes_connected_components(graph_session):
+    edges = graph_session.createDataFrame(
+        [("a", "b"), ("b", "c"), ("d", "e")], ["src", "dst"]
+    )
     component = {r.id: r.component for r in connected_components(edges).collect()}
     assert component["a"] == component["b"] == component["c"] != component["d"]
     assert component["d"] == component["e"]

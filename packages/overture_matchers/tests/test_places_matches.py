@@ -6,8 +6,8 @@ import pyarrow.parquet as pq
 import pytest
 from pyspark.sql import functions as F
 
+from overture_matchers.clustering import MATCH_COLUMNS
 from overture_matchers.places.matches import (
-    MATCH_COLUMNS,
     SCORED_PAIR_TYPES,
     accepted_pairs,
     match_results,
@@ -17,11 +17,6 @@ from overture_matchers.places.matches import (
 
 C, B = "candidate", "baseline"
 PAIR_SCHEMA = ", ".join(f"{c} {t}" for c, t in SCORED_PAIR_TYPES.items())
-
-
-@pytest.fixture
-def checkpoint_dir(spark, tmp_path):
-    spark.sparkContext.setCheckpointDir(str(tmp_path / "checkpoints"))
 
 
 def pairs(spark, *rows):
@@ -135,7 +130,7 @@ def test_no_match_rows_cover_candidates_in_no_pair(spark):
     assert len({r.cluster_id for r in rows}) == 2
 
 
-def test_match_results_cluster_connected_pairs(spark, checkpoint_dir, tmp_path):
+def test_match_results_cluster_connected_pairs(spark, graph_session, tmp_path):
     candidates = spark.createDataFrame(
         [("c1", "p"), ("c2", "p"), ("c3", "p")], "id string, provider string"
     )
@@ -151,3 +146,9 @@ def test_match_results_cluster_connected_pairs(spark, checkpoint_dir, tmp_path):
         frozenset({"c2", "b3"}),
     }
     assert [r.id for r in rows if r.match_type == "nomatch"] == ["c3"]
+
+
+def test_match_results_without_pairs_are_all_no_match(spark, graph_session):
+    candidates = spark.createDataFrame([("c1", "p")], "id string, provider string")
+    out = match_results(pairs(spark), candidates).collect()
+    assert [(r.id, r.match_type) for r in out] == [("c1", "nomatch")]

@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from pyspark.sql import functions as F
@@ -14,6 +13,7 @@ from overture_matchers.clustering import (
     CANDIDATE_BASELINE,
     CANDIDATE_CANDIDATE,
     MATCH,
+    MATCH_COLUMNS,
     NO_MATCH,
     connected_components,
 )
@@ -32,19 +32,6 @@ SCORED_PAIR_TYPES = {
     "provider": "string",
     "base_provider": "string",
 }
-MATCH_COLUMNS = (
-    "id",
-    "provider",
-    "record_type",
-    "base_id",
-    "base_provider",
-    "base_record_type",
-    "composite_score",
-    "cluster_id",
-    "match_type",
-    "match_sub_type",
-    "base_active",
-)
 # Paired sides that swap so the candidate lands on the ``id`` side.
 SWAPPED_SIDES = (
     ("id", "base_id"),
@@ -170,22 +157,17 @@ def no_match_rows(candidates: DataFrame, pairs: DataFrame) -> DataFrame:
     )
 
 
-def match_results(
-    pairs: DataFrame,
-    candidates: DataFrame,
-    components: Callable[[DataFrame], DataFrame] = connected_components,
-) -> DataFrame:
+def match_results(pairs: DataFrame, candidates: DataFrame) -> DataFrame:
     """The ``matches`` output: clustered pairs plus unpaired candidates.
 
     Args:
         pairs: Accepted pairs, in the scored-pair columns.
         candidates: Every candidate, with ``id`` and ``provider``.
-        components: Maps ``src``/``dst`` edges to ``id`` and ``component``.
 
     Returns:
         NO_MATCH rows, then MATCH rows. Unpaired baseline records get no row.
     """
     edges = pairs.select(F.col("id").alias("src"), F.col("base_id").alias("dst"))
     return no_match_rows(candidates, pairs).unionByName(
-        match_rows(pairs, components(edges))
+        match_rows(pairs, connected_components(edges))
     )

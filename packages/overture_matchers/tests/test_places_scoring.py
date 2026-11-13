@@ -385,8 +385,8 @@ def test_matching_writes_checkpoints_and_matches_with_the_jar_engines(
         SetupOutput(candidates, baseline), scoring_jar, str(tmp_path), CACHE
     )
     for name in ("blocking", "scores"):
-        out_ = stage_io.read_output(spark, str(tmp_path), name, job.FEATURE_TYPE)
-        assert {(r.id, r.base_id) for r in out_.collect()} == {("b", "c")}
+        written = stage_io.read_output(spark, str(tmp_path), name, job.FEATURE_TYPE)
+        assert {(r.id, r.base_id) for r in written.collect()} == {("b", "c")}
     validated = stage_io.read_output(
         spark, str(tmp_path), "matches_validated", job.FEATURE_TYPE
     )
@@ -396,16 +396,16 @@ def test_matching_writes_checkpoints_and_matches_with_the_jar_engines(
         expected
     )
     quiet = tmp_path / "quiet"
-    out = job.matching(
+    quiet_out = job.matching(
         SetupOutput(candidates, baseline),
         scoring_jar,
         str(quiet),
         CACHE,
         output_debug=False,
     )
-    assert {(r.id, r.base_id, r.match_sub_type) for r in out.matches.collect()} == (
-        expected
-    )
+    assert {
+        (r.id, r.base_id, r.match_sub_type) for r in quiet_out.matches.collect()
+    } == expected
     assert (quiet / "scores").exists()
     assert not (quiet / "matches_validated").exists()
 

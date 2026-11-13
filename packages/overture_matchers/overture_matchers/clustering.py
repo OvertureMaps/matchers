@@ -19,16 +19,31 @@ NO_MATCH = "nomatch"
 BASELINE_BASELINE = f"{BASELINE}_{BASELINE}"
 CANDIDATE_CANDIDATE = f"{CANDIDATE}_{CANDIDATE}"
 CANDIDATE_BASELINE = f"{CANDIDATE}_{BASELINE}"
+MATCH_COLUMNS = (
+    "id",
+    "provider",
+    "record_type",
+    "base_id",
+    "base_provider",
+    "base_record_type",
+    "composite_score",
+    "cluster_id",
+    "match_type",
+    "match_sub_type",
+    "base_active",
+)
+# Session settings ``connected_components`` needs. GraphFrames 0.8.3 on Spark
+# 3.5 drops edges under adaptive execution (graphframes/graphframes#453).
+CONNECTED_COMPONENTS_CONF = {"spark.sql.adaptive.enabled": "false"}
 
 
 def connected_components(edges: DataFrame) -> DataFrame:
     """The connected component of every vertex in ``edges``.
 
     Runs the GraphFrames JVM class through py4j, so only the GraphFrames jar
-    has to be on the classpath. The SparkContext needs a checkpoint directory.
-    Turns adaptive execution off for the session, because GraphFrames 0.8.3
-    on Spark 3.5 drops edges under it (graphframes/graphframes#453). The
-    returned frame is lazy, so the setting stays off.
+    has to be on the classpath, and Spark Connect is not supported. The
+    SparkContext needs a checkpoint directory, and the session needs
+    ``CONNECTED_COMPONENTS_CONF`` until the result is written.
 
     Args:
         edges: ``src`` and ``dst`` vertex IDs.
@@ -39,7 +54,6 @@ def connected_components(edges: DataFrame) -> DataFrame:
         compare components by membership.
     """
     spark: SparkSession = edges.sparkSession
-    spark.conf.set("spark.sql.adaptive.enabled", "false")
     vertices = (
         edges.select(F.col("src").alias("id"))
         .union(edges.select(F.col("dst").alias("id")))
