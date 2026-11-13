@@ -15,16 +15,14 @@ from pyspark import StorageLevel
 from pyspark.sql import functions as F
 
 from overture_matchers.places import features
-from overture_matchers.places.model import (
-    BLOCKING_BOOSTER_RESOURCE,
-    PlacesModel,
-    name_idf_udf,
-    predict_udf,
-)
 from overture_matchers.prematch import BASELINE, CANDIDATE
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from pyspark.sql import Column, DataFrame
+
+    from overture_matchers.places.model import PlacesModel
 
 # Columns each side carries into scoring.
 PAIR_COLUMNS = (
@@ -51,6 +49,13 @@ SHUFFLE_PARTITIONS_CONF = "spark.sql.shuffle.partitions"
 DEFAULT_SHUFFLE_PARTITIONS = "1920"
 SPATIAL_PARTITIONS_PER_CORE = 20
 _SERIALIZED = StorageLevel(True, True, False, False, 1)
+# Session settings ``spatial_pairs`` needs. Sedona partitions and indexes the
+# right side, and adaptive execution would re-plan the join's partitions.
+SPATIAL_JOIN_CONF = {
+    "sedona.join.spatitionside": "right",
+    "sedona.join.indexbuildside": "right",
+    "spark.sql.adaptive.enabled": "false",
+}
 
 
 def _by_pair_key(df: DataFrame, partitions: int) -> DataFrame:
@@ -66,6 +71,7 @@ def spatial_pairs(
 
     Keep the distance test in the form ``ST_DistanceSphere(a, b) < radius``:
     only then does Sedona plan a distance join instead of a cartesian product.
+    The session needs ``SPATIAL_JOIN_CONF``.
 
     Args:
         records: Records with ``id``, ``provider``, ``longitude``, ``latitude`` and ``carried``.
@@ -78,11 +84,6 @@ def spatial_pairs(
         ``geo_distance``, and each carried column for the left side and as
         ``base_<name>`` for the right.
     """
-    conf = records.sparkSession.conf
-    conf.set("sedona.join.spatitionside", "right")
-    conf.set("sedona.join.indexbuildside", "right")
-    # Adaptive execution would re-plan the join's partitions.
-    conf.set("spark.sql.adaptive.enabled", "false")
     points = records.select(
         *KEY, F.expr("ST_Point(longitude, latitude)").alias("geom"), *carried
     ).repartition(partitions)
@@ -112,32 +113,41 @@ def spatial_pairs(
     )
 
 
-def prune(pairs: DataFrame, model: PlacesModel, partitions: int) -> DataFrame:
-    """Keys of the pairs the blocking booster scores at or above its threshold.
+def prune(
+    pairs: DataFrame,
+    model: PlacesModel,
+    score: Callable[[list[Column]], Column],
+    partitions: int,
+) -> DataFrame:
+    """Keys of the pairs ``score`` puts at or above the model's threshold.
 
     Args:
         pairs: Output of ``spatial_pairs``.
         model: The model, whose feature order and threshold apply.
+        score: Blocking score from the feature columns in model order.
         partitions: Partitions of the result.
 
     Returns:
-        ``id``, ``provider``, ``base_id`` and ``base_provider``. Cached, because
-        ``blocking_pairs`` reads it twice.
+        ``id``, ``provider``, ``base_id`` and ``base_provider``. Persisted, so
+        each pair is scored once however often the result is read.
     """
     columns: list[Column] = [
         F.col(f) if f == features.GEO_DISTANCE else features.BLOCKING_FEATURES[f]()
         for f in model.blocking_features
     ]
-    score = predict_udf(model.jar_name, BLOCKING_BOOSTER_RESOURCE, columns)
     keys = pairs.select(
-        "id", "provider", "base_id", "base_provider", score.alias("score")
+        "id", "provider", "base_id", "base_provider", score(columns).alias("score")
     )
     survivors = keys.filter(F.col("score") >= model.blocking_threshold).drop("score")
     return _by_pair_key(survivors, partitions).persist(_SERIALIZED)
 
 
 def blocking_pairs(
-    candidates: DataFrame, baseline: DataFrame, model: PlacesModel
+    candidates: DataFrame,
+    baseline: DataFrame,
+    model: PlacesModel,
+    name_idf: Callable[[Column], Column],
+    score: Callable[[list[Column]], Column],
 ) -> DataFrame:
     """Candidate pairs that pass blocking, with both sides' columns.
 
@@ -145,6 +155,8 @@ def blocking_pairs(
         candidates: Candidates without history matches, from setup.
         baseline: The whole baseline, inactive records included.
         model: The model.
+        name_idf: Map of token to weight, from an array of name tokens.
+        score: Blocking score from the feature columns in model order.
 
     Returns:
         Each side's key, ``record_type`` and ``PAIR_COLUMNS``. The right side
@@ -169,9 +181,7 @@ def blocking_pairs(
     needs_idf = features.NAME_IDF in inputs
     carried = list(dict.fromkeys(inputs))
     spatial_input = (
-        unioned.withColumn(
-            features.NAME_IDF, name_idf_udf(model.jar_name, F.col("name_clean_tokens"))
-        )
+        unioned.withColumn(features.NAME_IDF, name_idf(F.col("name_clean_tokens")))
         if needs_idf
         else unioned
     )
@@ -181,7 +191,7 @@ def blocking_pairs(
         model.blocking_radius_m,
         spark.sparkContext.defaultParallelism * SPATIAL_PARTITIONS_PER_CORE,
     )
-    survivors = prune(pairs, model, shuffle_partitions)
+    survivors = prune(pairs, model, score, shuffle_partitions)
 
     output = [*KEY, "record_type", *PAIR_COLUMNS]
     left, right = unioned.alias("left"), unioned.alias("right")
