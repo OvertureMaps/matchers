@@ -19,6 +19,7 @@ from pyspark import StorageLevel
 from pyspark.sql import functions as F
 
 from overture_matchers import ids
+from overture_matchers.clustering import CONNECTED_COMPONENTS_CONF
 from overture_matchers.core import io
 from overture_matchers.core.config import RunConfig
 from overture_matchers.core.local import run_local
@@ -38,6 +39,7 @@ from overture_matchers.places.blocking import (
     by_pair_key,
     shuffle_partition_count,
 )
+from overture_matchers.places.matches import accepted_pairs, match_results
 from overture_matchers.places.metric_inputs import load_optional_inputs
 from overture_matchers.places.metrics import METRICS
 from overture_matchers.places.model import (
@@ -63,6 +65,7 @@ from overture_matchers.places.runtime import (
 )
 from overture_matchers.places.scoring import MISSING_CACHE, Scorer, score_pairs
 from overture_matchers.places.selection import select_winners
+from overture_matchers.prematch import history_pairs
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -73,8 +76,10 @@ logger = logging.getLogger(__name__)
 
 FEATURE_TYPE = "place"
 THEME = "places"
-# GraphFrames build. Its jar also carries the Python API.
-PACKAGES = ("graphframes:graphframes:0.8.3-spark3.4-s_2.12",)
+# GraphFrames 0.8.3 built for Spark 3.5. It has no dependencies beyond Spark.
+PACKAGES = ("graphframes:graphframes:0.8.3-spark3.5-s_2.12",)
+# Session settings for the whole job, so fresh and resumed runs plan alike.
+JOB_CONF = {**SPATIAL_JOIN_CONF, **CONNECTED_COMPONENTS_CONF}
 
 
 def setup(
@@ -152,6 +157,7 @@ def matching(
     model_jar: str,
     output_path: str | None = None,
     embeddings_cache_table: str | None = None,
+    output_debug: bool = True,
 ) -> MatchingOutput:
     """Generate pairs, score them and cluster the matches.
 
@@ -163,6 +169,8 @@ def matching(
             ``scores`` checkpoints.
         embeddings_cache_table: Table of name and taxonomy embeddings. It is
             resolved before blocking, and only if the model has a cosine feature.
+        output_debug: Whether ``output_path`` also receives the accepted
+            pairs, as ``matches_validated``.
     """
     spark = prepared.candidates.sparkSession
     spark.sparkContext.addFile(model_jar)
@@ -192,8 +200,15 @@ def matching(
         "scores",
         FEATURE_TYPE,
     )
-    del scores
-    raise NotImplementedError("matching: clustering is not ported yet")
+    validated = accepted_pairs(scores, history_pairs(prepared.candidates))
+    if output_debug:
+        validated = io.checkpoint(
+            validated, output_path, "matches_validated", FEATURE_TYPE
+        )
+    else:
+        # Clustering and the NO_MATCH rows both read the accepted pairs.
+        validated = validated.persist(StorageLevel.MEMORY_AND_DISK)
+    return MatchingOutput(match_results(validated, prepared.candidates))
 
 
 def assign_ids(
@@ -247,8 +262,7 @@ def run(spark: SparkSession, config: RunConfig) -> None:
         raise ValueError("places needs the modelJar param")
     # GraphFrames connected components needs a checkpoint directory.
     spark.sparkContext.setCheckpointDir(io.run_uri(config.output_path, "checkpoints"))
-    # Set once for the whole job, so fresh and resumed runs plan stages alike.
-    for key, value in SPATIAL_JOIN_CONF.items():
+    for key, value in JOB_CONF.items():
         spark.conf.set(key, value)
     raw = RawInputs(
         spark.read.parquet(*config.input[FEATURE_TYPE]),
@@ -274,6 +288,7 @@ def run(spark: SparkSession, config: RunConfig) -> None:
         model_jar=config.model_jar,
         output_path=config.output_path,
         embeddings_cache_table=config.embeddings_cache_table,
+        output_debug=config.output_debug,
     )
     assigned = run_stage(
         spark,

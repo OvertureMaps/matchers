@@ -4,6 +4,8 @@
 
 import pytest
 
+from overture_matchers.clustering import connected_components
+
 
 def test_sedona_functions_blocking_uses(spark):
     row = spark.sql(
@@ -14,12 +16,10 @@ def test_sedona_functions_blocking_uses(spark):
     assert len(row.cells) == 1
 
 
-def test_graphframes_connected_components(spark, tmp_path):
-    from graphframes import GraphFrame
-
-    spark.sparkContext.setCheckpointDir(str(tmp_path))
-    vertices = spark.createDataFrame([(i,) for i in range(4)], ["id"])
-    edges = spark.createDataFrame([(0, 1), (2, 3)], ["src", "dst"])
-    rows = GraphFrame(vertices, edges).connectedComponents().collect()
-    component = {r.id: r.component for r in rows}
-    assert component[0] == component[1] != component[2] == component[3]
+def test_graphframes_connected_components(graph_session):
+    edges = graph_session.createDataFrame(
+        [("a", "b"), ("b", "c"), ("d", "e")], ["src", "dst"]
+    )
+    component = {r.id: r.component for r in connected_components(edges).collect()}
+    assert component["a"] == component["b"] == component["c"] != component["d"]
+    assert component["d"] == component["e"]

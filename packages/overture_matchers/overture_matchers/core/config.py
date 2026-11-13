@@ -27,12 +27,13 @@ _PARAM_FIELDS = {
     "provider": "provider",
     "baselineProvider": "baseline_provider",
     "matchHistory": "match_history",
+    "outputDebug": "output_debug",
     "embeddingsCacheTable": "embeddings_cache_table",
     "previousMetricsPath": "previous_metrics_path",
     "modelJar": "model_jar",
 }
 _REQUIRED = ("output_path", "input", "baseline", "provider")
-_BOOLS = ("match_history",)
+_BOOLS = ("match_history", "output_debug")
 _PATH_MAPS = ("input", "baseline")
 
 
@@ -79,6 +80,7 @@ class RunConfig:
         baseline_provider: Provider to stamp on a baseline that has no
             ``provider`` column, such as a Places release. Places only.
         match_history: Whether candidates with history matches skip scoring.
+        output_debug: Whether matching also writes ``matches_validated``.
         model_jar: The ``places-matcher-model`` jar. Only places reads it.
     """
 
@@ -89,6 +91,7 @@ class RunConfig:
     baseline_provider: str | None = None
     # Scala's theme configs default this to true.
     match_history: bool = True
+    output_debug: bool = True
     embeddings_cache_table: str | None = None
     previous_metrics_path: str | None = None
     model_jar: str | None = None
