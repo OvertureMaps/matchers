@@ -10,7 +10,7 @@ package = false
 required-version = ">=0.13.4"
 
 [dependency-groups]
-dev = ["ruff==0.17.3"]
+dev = ["ruff==0.17.4"]
 
 # Shared ruff config. Each package's pyproject.toml extends this file.
 [tool.ruff.lint]
