@@ -7,8 +7,8 @@
 """Compare two matcher runs on the same input and print where they differ, as JSON.
 
 A_RUN (usually Scala) and B_RUN (usually Python) are the folders a run writes
-its stage outputs to, laid out as `<stage output>/type=<feature_type>/`. Both runs
-need `outputDebug=true` for the ID map. The report has two parts:
+its stage outputs to, laid out as `<stage output>/type=<feature_type>/`. A Scala run
+needs `outputDebug=true` for the ID map. The report has two parts:
 
   ids     share of candidate records with the same outcome in both runs, overall
           and broken down by country and by match type. The outcome is the
