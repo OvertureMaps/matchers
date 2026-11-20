@@ -274,6 +274,7 @@ class RunConfig:
     model_jar: str  # versioned path of the places-matcher-model jar
     baseline_provider: str | None = None  # for a baseline with no provider column
     match_history: bool = True  # Scala's theme configs set this to true
+    output_debug: bool = True  # also Scala's theme config default
     # ...
 
     @classmethod
@@ -358,7 +359,7 @@ Each package is versioned from its own `<package>-v<version>` tags through pytho
 | `com.wherobots:jpostal` 1.2.2 (OvertureMaps/overture-matchers#478) | Sedona 1.8.1 `ParseAddress` | Same jpostal build Sedona uses. Set `spark.sedona.libpostal.dataDir` to the v1.0.0 model data the Scala job uses today. Tested 100% identical to the earlier custom build on 449k public addresses. Sedona's default model download changes 18% of non-US addresses; do not use it during the port. |
 | Sedona 1.7.2 | Sedona 1.8.1 Python API | tf-data-platform pins one Sedona version for all jobs, and its libpostal jobs already use 1.8.1; regression-check the other Sedona jobs. |
 | xgboost4j-spark | `xgboost.Booster().load_model()` on the native booster file, `inplace_predict` in a pandas UDF | Numeric Arrow crossing costs about 0.85 µs/row. |
-| GraphFrames (Scala) | `graphframes` Python API | Same jar. |
+| GraphFrames 0.8.3 for Spark 3.4 (Scala) | `graphframes:graphframes:0.8.3-spark3.5-s_2.12`, called through py4j (`clustering.connected_components`) | Same algorithm and defaults, built for Spark 3.5. No Python module is needed on the driver or workers. The newer `io.graphframes` releases pull in Spark 3.5.8 and a datasketches version that clashes with Spark's. |
 | libphonenumber | `phonenumbers` |  |
 | spark-nlp (Scala) | spark-nlp Python API, pin `spark-nlp==5.5.1` | Assembly jar already attached for divisions. |
 | commons-text, stringdistance | Spark built-in `levenshtein()` in blocking; `rapidfuzz` in UDFs |  |
@@ -454,6 +455,7 @@ Implementation details behind the design above.
     "provider": "<provider>",
     "model_jar": "<path>/places-matcher-model-<version>.jar",
     "match_history": true,
+    "output_debug": true,
     "embeddings_cache_table": null,
     "previous_metrics_path": "s3a://.../<previous run>/metrics/",
     "versions": {"overture-matchers": "<version>"}
@@ -462,7 +464,7 @@ Implementation details behind the design above.
 
 ### Rules
 
-- Transformation functions are pure. S3 reads and writes happen only in each theme's `run()`, in `run_stage`, and in `io.checkpoint`. Stages that checkpoint take an `output_path`, and `io.checkpoint(df, output_path, name, feature_type)` writes `df` to `<run>/<name>/` and returns a read of it. That cuts the lineage, so later transformations don't recompute earlier ones and the query plan stays small. Matching checkpoints after blocking, where about 42B spatial pairs shrink to about 170M. Checkpoint outputs stay with the run. Places matching always writes `blocking/`, `scores/` and `matches_validated/` through `io.checkpoint`, and `assign_ids` always writes `idMap/`. Every Scala places config sets `outputDebug` to true, so production output stays the same. The Python job has no `outputDebug` param and ignores one if passed. Scala's debug-off path, a plain `df.checkpoint()` into `checkpoints/`, is not ported. This keeps Scala's four stages until cutover, where splitting matching into more stages would change the layout.
+- Transformation functions are pure. S3 reads and writes happen only in each theme's `run()`, in `run_stage`, and in `io.checkpoint`. Stages that checkpoint take an `output_path`, and `io.checkpoint(df, output_path, name, feature_type)` writes `df` to `<run>/<name>/` and returns a read of it. That cuts the lineage, so later transformations don't recompute earlier ones and the query plan stays small. Matching checkpoints after blocking, where about 42B spatial pairs shrink to about 170M. Checkpoint outputs stay with the run. Places matching always writes `blocking/` and `scores/` through `io.checkpoint`, and `assign_ids` always writes `idMap/`. Matching writes `matches_validated/` only when the `outputDebug` param is on. It defaults to true, as every Scala places config sets it. Scala's debug-off path, a plain `df.checkpoint()` into `checkpoints/`, is not ported. This keeps Scala's four stages until cutover, where splitting matching into more stages would change the layout.
 - A DataFrame that two branches of one stage read gets an explicit `.cache()`. In `match_places`, candidates feed both the history pairs and the spatial union. `run_stage` writes each output separately, so upstream work shared by two outputs of one stage gets cached before the stage returns: in `assign_ids`, `final` and `fallout` both come from the cluster winner selection, which Scala caches too.
 - Each stage output's columns are defined by the `select` that produces it, as in Scala (the transformer's required-columns list, the `MatchResult` columns). There is no separate schema validation layer for now; schema tracking across Overture pipelines is an open, org-wide question.
 - Setup functions build one `select` from a list of column expressions. A `withColumn` chain adds one projection per column to the query plan.
@@ -491,6 +493,7 @@ Implementation details behind the design above.
 - Projected cost of this layout, extrapolated from local microbenchmarks: about +3-4% run time. Python UDFs everywhere: about +15%. A literal pure-Python port: about 2.7x. The blocking model's pandas UDF runs on all 42B pairs, so each extra µs per row adds about a minute. A full-scale staging run measures the real cost before cutover.
 - Keep Scala's spatial-join settings at first: repartition to `defaultParallelism * 20`, its Sedona hints, AQE off, 1,920 shuffle partitions after blocking (`PlacesUnionedMatcher.scala`).
 - Set the Spark checkpoint directory for GraphFrames connected components, as Scala's `JobUtils` does.
+- GraphFrames 0.8.3 on Spark 3.5 gives wrong components with AQE on (graphframes/graphframes#453), and in the unit tests its plan grew until the driver ran out of memory. `connected_components` declares `CONNECTED_COMPONENTS_CONF` (AQE off), and `run` applies it once for the whole job, with the spatial-join settings, as `JOB_CONF`. Scala has it off by then too, because blocking turned it off.
 - XGBoost runs with `nthread=1`, and the job sets `OMP_NUM_THREADS=1`, so 32 Python workers per Glue worker don't oversubscribe the cores.
 - Cache with an explicit serialized storage level (`MEMORY_AND_DISK_SER`, as Scala's loader does), on narrow projections, and `unpersist()` as soon as the branches that read it finish.
 - Glue: each worker runs up to 32 Python worker processes outside the JVM heap, each holding rapidfuzz, the booster and sketch readers. Test memory at full scale.
@@ -528,7 +531,7 @@ Harness layout: `parity/` sits outside `packages/`, so nothing in it ships to Py
 - the DAG stops sending `scenario` and `environment`. `scenario` only feeds Scala's H3 ID generator, which places doesn't use, and `environment` only flags Scala's local test runs
 - the DAG sends `modelJar`, the path of the `places-matcher-model` jar
 - the DAG stops sending `runId`. Scala uses it to stamp `snapshot` (`<provider>-<theme>-<runId>`) on every metrics row. Python's metrics rows leave out `snapshot` and `stage`, and `MatcherTelemetryJob` fills both through `TelemetryEmitter`, which already builds the same snapshot from its own `run_id` param
-- the job's extra jars are GraphFrames (shaded into the Scala jar today), the `PlaceTextNormalizer` jar, and spark-nlp for divisions. jpostal and libphonenumber drop out: Sedona 1.8.1 ships jpostal, and phones use `phonenumbers`
+- the job's extra jars are GraphFrames (`graphframes-0.8.3-spark3.5-s_2.12.jar` from the spark-packages repository, with no dependencies; Scala shades the Spark 3.4 build into its jar today), the `PlaceTextNormalizer` jar, and spark-nlp for divisions. jpostal and libphonenumber drop out: Sedona 1.8.1 ships jpostal, and phones use `phonenumbers`
 - libpostal model data: the Scala job receives it as a Glue extra file, which works only because a JVM job's params pass through as Glue arguments, and a Python job's params do not. Instead, the v1.0.0 model data sits unpacked under an S3 prefix, the job's Spark conf sets `spark.sedona.libpostal.dataDir` to it, and setup calls `sc.addFile(<prefix>, recursive=True)`, Sedona's documented mode for remote data. The `.so` files drop out
 - the DAG stops reading the job's `outputResultFile`. The final path is fixed by the layout (`<outputPath>/final/type=<feature_type>/`), so the DAG builds the `{"<feature_type>": "<path>"}` map itself. The jobs write no result file and ignore an `outputResultFile` param, so cloned Scala arguments still run
 

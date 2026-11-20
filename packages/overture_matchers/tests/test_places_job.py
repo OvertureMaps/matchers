@@ -15,7 +15,6 @@ from overture_matchers.core.stages import (
     SetupOutput,
 )
 from overture_matchers.places import job
-from overture_matchers.places.blocking import SPATIAL_JOIN_CONF
 
 
 def test_output_names_match_scala_postfixes_and_are_unique():
@@ -49,14 +48,12 @@ def stub_stages(spark, monkeypatch):
     ) -> SetupOutput:
         return SetupOutput(spark.range(1), spark.range(1))
 
-    def matching(
-        prepared, model_jar, output_path=None, embeddings_cache_table=None
-    ) -> MatchingOutput:
+    def matching(prepared, model_jar, **kwargs) -> MatchingOutput:
         raise NotImplementedError("matching is not ported")
 
     monkeypatch.setattr(job, "setup", setup)
     monkeypatch.setattr(job, "matching", matching)
-    saved = {key: spark.conf.get(key, None) for key in SPATIAL_JOIN_CONF}
+    saved = {key: spark.conf.get(key, None) for key in job.JOB_CONF}
     yield
     for key, value in saved.items():
         if value is None:
@@ -68,13 +65,14 @@ def stub_stages(spark, monkeypatch):
 def test_job_writes_config_then_stops_at_first_stub(
     spark, tmp_path, params, stub_stages
 ):
+    spark.conf.set("spark.sql.adaptive.enabled", "true")
     runner = job.PlacesMatchingJob()
     runner.spark = spark
     result = runner.run(params)
     assert isinstance(result.exception, NotImplementedError)
     assert (tmp_path / "run" / "config.json").is_file()
     assert "/run/checkpoints/" in spark.sparkContext.getCheckpointDir()
-    assert spark.conf.get("spark.sql.adaptive.enabled") == "false"
+    assert {k: spark.conf.get(k) for k in job.JOB_CONF} == job.JOB_CONF
     assert "matching" in str(result.exception)
     assert not (tmp_path / "run" / "_completed_stages" / "matching").exists()
 
@@ -101,12 +99,17 @@ def test_run_chains_stage_outputs_and_skips_on_rerun(spark, params, monkeypatch)
         return SetupOutput(spark.range(3), spark.range(4))
 
     def matching(
-        prepared, model_jar, output_path=None, embeddings_cache_table=None
+        prepared,
+        model_jar,
+        output_path=None,
+        embeddings_cache_table=None,
+        output_debug=True,
     ) -> MatchingOutput:
         calls["matching"] = (
             prepared.candidates.count(),
             prepared.baseline.count(),
             output_path,
+            output_debug,
         )
         return MatchingOutput(spark.range(5))
 
@@ -127,12 +130,14 @@ def test_run_chains_stage_outputs_and_skips_on_rerun(spark, params, monkeypatch)
 
     for fake in (setup, matching, assign_ids, metrics, load_optional_inputs):
         monkeypatch.setattr(job, fake.__name__, fake)
-    config = job.RunConfig.from_params(params | {"matchHistory": "false"})
+    config = job.RunConfig.from_params(
+        params | {"matchHistory": "false", "outputDebug": "false"}
+    )
     job.run(spark, config)
     run = params["outputPath"]
     assert calls == {
         "setup": (2, False),
-        "matching": (3, 4, run),
+        "matching": (3, 4, run, False),
         "assign_ids": (5, config.provider, run),
         "metrics": (6, 7, {"loaded": True}),
     }

@@ -15,6 +15,7 @@ import pytest
 import xgboost
 from overture_spark import SparkPlatform, getSparkSedonaSession
 
+from overture_matchers.clustering import CONNECTED_COMPONENTS_CONF
 from overture_matchers.places.job import PACKAGES
 
 # Optional private inputs. Tests that need them skip when they are unset.
@@ -70,6 +71,21 @@ def spark():
     )
     yield session
     session.stop()
+
+
+@pytest.fixture
+def graph_session(spark, tmp_path):
+    """``spark`` ready for ``connected_components``, with its settings restored after."""
+    spark.sparkContext.setCheckpointDir(str(tmp_path / "checkpoints"))
+    before = {k: spark.conf.get(k, None) for k in CONNECTED_COMPONENTS_CONF}
+    for key, value in CONNECTED_COMPONENTS_CONF.items():
+        spark.conf.set(key, value)
+    yield spark
+    for key, value in before.items():
+        if value is None:
+            spark.conf.unset(key)
+        else:
+            spark.conf.set(key, value)
 
 
 FEATURES = ["name_tfidf", "name_similarity", "geo_distance"]

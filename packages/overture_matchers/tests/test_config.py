@@ -23,8 +23,12 @@ def test_from_params_fills_defaults_and_parses_types():
     )
     assert config.baseline == {"place": ["/tmp/base"]}
     assert config.match_history is True
+    assert config.output_debug is True
     assert config.embeddings_cache_table is None
     assert config.model_jar is None
+    assert (
+        RunConfig.from_params(PARAMS | {"outputDebug": "false"}).output_debug is False
+    )
     assert RunConfig.from_params(PARAMS | {"modelJar": "/m.jar"}).model_jar == "/m.jar"
     assert RunConfig.from_params(PARAMS | {"outputPath": "/r/"}).output_path == "/r"
     s3 = RunConfig.from_params(
