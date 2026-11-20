@@ -272,6 +272,7 @@ class RunConfig:
     baseline: dict[str, list[str]]
     output_path: str  # bundle base
     model_jar: str  # versioned path of the places-matcher-model jar
+    baseline_provider: str | None = None  # for a baseline with no provider column
     match_history: bool = True  # Scala's theme configs set this to true
     # ...
 
