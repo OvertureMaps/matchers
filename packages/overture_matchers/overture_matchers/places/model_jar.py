@@ -17,7 +17,8 @@ CONFIG_RESOURCE = "places_matcher_model/metadata/config"
 REFERENCE_RESOURCE = "places_matcher_model/combined_test_dataset.parquet"
 
 
-def _open(spark: SparkSession, model_jar: str) -> zipfile.ZipFile:
+def open_jar(spark: SparkSession, model_jar: str) -> zipfile.ZipFile:
+    """Open the jar on the driver."""
     # binaryFile reads any Hadoop-readable URI without changing session state.
     content = spark.read.format("binaryFile").load(model_jar).first()["content"]
     return zipfile.ZipFile(io.BytesIO(content))
@@ -25,7 +26,7 @@ def _open(spark: SparkSession, model_jar: str) -> zipfile.ZipFile:
 
 def read_feature_order(spark: SparkSession, model_jar: str) -> tuple[str, ...]:
     """The scoring features, in model order."""
-    with _open(spark, model_jar) as jar:
+    with open_jar(spark, model_jar) as jar:
         config = json.loads(jar.read(CONFIG_RESOURCE))
     return tuple(config["feature_order"])
 
@@ -37,7 +38,7 @@ def read_reference_dataset(
 
     The file is copied into the run folder first, so executors can read it.
     """
-    with _open(spark, model_jar) as jar, tempfile.TemporaryDirectory() as tmp:
+    with open_jar(spark, model_jar) as jar, tempfile.TemporaryDirectory() as tmp:
         if REFERENCE_RESOURCE not in jar.namelist():
             return None
         local = jar.extract(REFERENCE_RESOURCE, tmp)
