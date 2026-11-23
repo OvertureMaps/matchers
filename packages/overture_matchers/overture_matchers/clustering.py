@@ -33,8 +33,13 @@ MATCH_COLUMNS = (
     "base_active",
 )
 # Session settings ``connected_components`` needs. GraphFrames 0.8.3 on Spark
-# 3.5 drops edges under adaptive execution (graphframes/graphframes#453).
-CONNECTED_COMPONENTS_CONF = {"spark.sql.adaptive.enabled": "false"}
+# 3.5 drops edges under adaptive execution (graphframes/graphframes#453), and
+# Sedona 1.8.1's shaded GraphFrames 0.10.0 falls back to slow RDD checkpoints
+# unless local checkpoints are enabled.
+CONNECTED_COMPONENTS_CONF = {
+    "spark.sql.adaptive.enabled": "false",
+    "spark.graphframes.useLocalCheckpoints": "true",
+}
 
 
 def connected_components(edges: DataFrame) -> DataFrame:
@@ -42,8 +47,9 @@ def connected_components(edges: DataFrame) -> DataFrame:
 
     Runs the GraphFrames JVM class through py4j, so only the GraphFrames jar
     has to be on the classpath, and Spark Connect is not supported. The
-    SparkContext needs a checkpoint directory, and the session needs
-    ``CONNECTED_COMPONENTS_CONF`` until the result is written.
+    SparkContext needs a checkpoint directory when GraphFrames 0.8.3 is first
+    on the classpath, and the session needs ``CONNECTED_COMPONENTS_CONF`` until
+    the result is written.
 
     Args:
         edges: ``src`` and ``dst`` vertex IDs.
@@ -54,6 +60,9 @@ def connected_components(edges: DataFrame) -> DataFrame:
         compare components by membership.
     """
     spark: SparkSession = edges.sparkSession
+    # GraphFrames 0.10.0 reads conf from SparkSession.getActiveSession, which
+    # is thread-local in the JVM and can be unset on a fresh Py4J thread.
+    spark._jvm.org.apache.spark.sql.SparkSession.setActiveSession(spark._jsparkSession)
     vertices = (
         edges.select(F.col("src").alias("id"))
         .union(edges.select(F.col("dst").alias("id")))
