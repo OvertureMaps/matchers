@@ -18,3 +18,6 @@
 * @OvertureMaps/omf-eng-ops-reviewers
 
 /.github/ @OvertureMaps/overture-devops-reviewers
+
+uv.lock @OvertureMaps/overture-devops-reviewers
+pyproject.toml @OvertureMaps/overture-devops-reviewers
