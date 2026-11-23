@@ -67,49 +67,51 @@ class MetricInputs(NamedTuple):
     # A sample of ``scores`` that is small enough to profile feature by feature.
     score_sample: DataFrame | None = None
     feature_order: tuple[str, ...] = ()
-    reference: DataFrame | None = None
-    previous: DataFrame | None = None
+    reference_dataset: DataFrame | None = None
+    previous_metrics: DataFrame | None = None
 
 
-def round_half_up(value: float, places: int) -> float:
+def round_half_up(value: float, decimal_places: int) -> float:
     """Round the shortest decimal form of ``value``, so 0.125 at 2 places gives 0.13."""
-    exp = Decimal(1).scaleb(-places)
-    return float(Decimal(repr(value)).quantize(exp, rounding=ROUND_HALF_UP))
+    quantum = Decimal(1).scaleb(-decimal_places)
+    return float(Decimal(repr(value)).quantize(quantum, rounding=ROUND_HALF_UP))
 
 
-def percentage(part: float, whole: float) -> float:
-    """``part`` as a percentage of ``whole``, or 0 when ``whole`` is 0."""
+def compute_percentage(part: float, whole: float) -> float:
+    """Compute ``part`` as a percentage of ``whole``, or 0 when ``whole`` is 0."""
     return part / whole * 100 if whole > 0 else 0.0
 
 
-def _active(baseline: DataFrame) -> DataFrame:
+def _filter_active_records(baseline: DataFrame) -> DataFrame:
     return baseline.where(F.col("active") == 1)
 
 
-def _of_provider(df: DataFrame, provider: str) -> DataFrame:
-    return df.where(F.col("provider") == provider)
+def _filter_by_provider(records: DataFrame, provider: str) -> DataFrame:
+    return records.where(F.col("provider") == provider)
 
 
-def total_counts(inp: MetricInputs) -> list[MetricRow]:
-    """Input, active baseline and result counts."""
-    provider_baseline = _of_provider(inp.prepared_baseline, inp.provider)
-    active = _active(inp.prepared_baseline)
-    provider_active = _active(provider_baseline)
+def compute_total_counts(inputs: MetricInputs) -> list[MetricRow]:
+    """Compute input, active baseline and result counts."""
+    provider_baseline = _filter_by_provider(inputs.prepared_baseline, inputs.provider)
+    active_baseline = _filter_active_records(inputs.prepared_baseline)
+    provider_active = _filter_active_records(provider_baseline)
     counts = {
-        "MatchCandidateInputCount": inp.candidates.count(),
-        "MatchBaselineInputCount": inp.baseline.count(),
+        "MatchCandidateInputCount": inputs.candidates.count(),
+        "MatchBaselineInputCount": inputs.baseline.count(),
         "MatchProviderBaselineInputCount": provider_baseline.count(),
-        "MatchActiveBaselineRecordCount": active.count(),
-        "MatchActiveBaselineEntityCount": active.select("id").distinct().count(),
+        "MatchActiveBaselineRecordCount": active_baseline.count(),
+        "MatchActiveBaselineEntityCount": active_baseline.select("id")
+        .distinct()
+        .count(),
         "MatchProviderActiveBaselineEntityCount": provider_active.select("id")
         .distinct()
         .count(),
-        "MatchResultsCount": inp.results.count(),
+        "MatchResultsCount": inputs.results.count(),
     }
-    return [(metric_id, float(n), "") for metric_id, n in counts.items()]
+    return [(metric_id, float(count), "") for metric_id, count in counts.items()]
 
 
-def match_result_breakdown(inp: MetricInputs) -> list[MetricRow]:
+def compute_match_result_breakdown(inputs: MetricInputs) -> list[MetricRow]:
     """Count the IDs and provider records the run makes new, retained, resurrected or dropped.
 
     Each result row is classified by its ID, and by its ``(id, provider)`` record.
@@ -117,11 +119,11 @@ def match_result_breakdown(inp: MetricInputs) -> list[MetricRow]:
     Dropped counts are active records of the run's provider that no result carries,
     and the IDs among them that no other provider keeps active.
     """
-    baseline = inp.prepared_baseline
-    results = inp.results
+    baseline = inputs.prepared_baseline
+    results = inputs.results
     total = results.count()
 
-    new_ids = results.join(inp.baseline, "id", "left_anti").count()
+    new_ids = results.join(inputs.baseline, "id", "left_anti").count()
     deleted_ids = (
         baseline.groupBy("id")
         .agg(F.max("active").alias("max_active"))
@@ -135,12 +137,14 @@ def match_result_breakdown(inp: MetricInputs) -> list[MetricRow]:
     deleted_records = baseline.where(F.col("active") == 0).select(*keys)
     resurrected_records = results.join(deleted_records, keys, "left_semi").count()
 
-    from_provider = _active(_of_provider(baseline, inp.provider))
+    from_provider = _filter_active_records(
+        _filter_by_provider(baseline, inputs.provider)
+    )
     dropped_records = from_provider.join(
         results.select("id"), "id", "left_anti"
     ).select("id")
-    from_others = _active(baseline).where(
-        ~F.coalesce(F.col("provider") == inp.provider, F.lit(False))
+    from_others = _filter_active_records(baseline).where(
+        ~F.coalesce(F.col("provider") == inputs.provider, F.lit(False))
     )
     dropped_ids = dropped_records.distinct().join(
         from_others.select("id"), "id", "left_anti"
@@ -155,16 +159,16 @@ def match_result_breakdown(inp: MetricInputs) -> list[MetricRow]:
         "MatchRetainedProviderRecordCount": total - new_records - resurrected_records,
         "MatchResurrectedProviderRecordCount": resurrected_records,
         "MatchDroppedProviderRecordCount": dropped_records.count(),
-        "MatchReductionCount": inp.candidates.count() - total,
+        "MatchReductionCount": inputs.candidates.count() - total,
     }
-    return [(metric_id, float(n), "") for metric_id, n in counts.items()]
+    return [(metric_id, float(count), "") for metric_id, count in counts.items()]
 
 
-def history_match(inp: MetricInputs) -> list[MetricRow]:
-    """Candidates that setup matched through history, and their share."""
-    total = inp.prepared_candidates.count()
-    matched = inp.prepared_candidates.where(F.col("base_ids").isNotNull()).count()
-    rate = round_half_up(percentage(matched, total), 2)
+def compute_history_match_metrics(inputs: MetricInputs) -> list[MetricRow]:
+    """Compute candidates that setup matched through history, and their share."""
+    total = inputs.prepared_candidates.count()
+    matched = inputs.prepared_candidates.where(F.col("base_ids").isNotNull()).count()
+    rate = round_half_up(compute_percentage(matched, total), 2)
     return [
         ("MatchHistoryMatchCount", float(matched), ""),
         ("MatchHistoryMatchRate", rate, ""),
@@ -172,13 +176,13 @@ def history_match(inp: MetricInputs) -> list[MetricRow]:
 
 
 SHARED_METRICS: tuple[tuple[str, Metric], ...] = (
-    ("Total Counts", total_counts),
-    ("Match Result Breakdown", match_result_breakdown),
-    ("History Match Rate", history_match),
+    ("Total Counts", compute_total_counts),
+    ("Match Result Breakdown", compute_match_result_breakdown),
+    ("History Match Rate", compute_history_match_metrics),
 )
 
 
-def compute(
+def compute_metrics(
     inputs: MetricInputs, metrics: Iterable[tuple[str, Metric]]
 ) -> list[MetricRow]:
     """Run each metric in order, skipping those that raise."""
@@ -191,14 +195,14 @@ def compute(
     return rows
 
 
-def to_frame(
+def build_metrics_dataframe(
     spark: SparkSession,
     rows: Iterable[MetricRow],
     theme: str,
     feature_type: str,
     provider: str,
 ) -> DataFrame:
-    """One-file metrics table. The first row of each ``(metric_id, sub_partition)`` wins."""
+    """Build a one-file metrics table where the first ``(metric_id, sub_partition)`` wins."""
     now = datetime.now(UTC)
     unique = {}
     for metric_id, value, sub_partition in rows:

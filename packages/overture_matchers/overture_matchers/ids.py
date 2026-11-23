@@ -42,9 +42,12 @@ def assign_ids(
         The winning candidates with their assigned ``id`` and ``provider``.
     """
     assigned = (
-        candidates.alias("c")
-        .join(winners.alias("w"), F.col("c.id") == F.col("w.id"))
-        .select("c.*", F.coalesce("w.base_id", F.expr("uuid()")).alias("assigned_id"))
+        candidates.alias("candidates")
+        .join(winners.alias("winners"), F.col("candidates.id") == F.col("winners.id"))
+        .select(
+            "candidates.*",
+            F.coalesce("winners.base_id", F.expr("uuid()")).alias("assigned_id"),
+        )
     )
     if output_path is None:
         assigned = assigned.cache()

@@ -7,7 +7,6 @@ Run locally with ``python -m overture_matchers.places.job <params.json>``.
 
 from __future__ import annotations
 
-import logging
 import sys
 from typing import TYPE_CHECKING
 
@@ -27,9 +26,12 @@ from overture_matchers.core.stages import (
     SetupOutput,
     run_stage,
 )
-from overture_matchers.metrics import MetricInputs, to_frame
-from overture_matchers.metrics import compute as compute_metrics
-from overture_matchers.places.metric_inputs import load_optional_inputs
+from overture_matchers.metrics import (
+    MetricInputs,
+    build_metrics_dataframe,
+    compute_metrics,
+)
+from overture_matchers.places.metric_inputs import load_optional_metric_inputs
 from overture_matchers.places.metrics import METRICS
 from overture_matchers.places.prepare import (
     BLOCKING_RESOLUTION,
@@ -42,14 +44,12 @@ from overture_matchers.places.runtime import (
     bind_jvm_text_functions,
     register_text_udfs,
 )
-from overture_matchers.places.selection import select_winners
+from overture_matchers.places.selection import select_cluster_winners_and_fallout
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from pyspark.sql import SparkSession
-
-logger = logging.getLogger(__name__)
 
 FEATURE_TYPE = "place"
 THEME = "places"
@@ -116,7 +116,9 @@ def assign_ids(
     output_path: str | None = None,
 ) -> AssignIdsOutput:
     """Pick cluster winners and assign GERS IDs."""
-    winners, fallout = select_winners(matched.matches, prepared.baseline)
+    winners, fallout = select_cluster_winners_and_fallout(
+        matched.matches, prepared.baseline
+    )
     final = ids.assign_ids(
         raw.candidates, winners, provider, output_path, feature_type=FEATURE_TYPE
     )
@@ -129,12 +131,12 @@ def metrics(
     matched: MatchingOutput,
     assigned: AssignIdsOutput,
     provider: str,
-    load_optional: Callable[[], dict[str, object]] = dict,
+    load_optional_inputs: Callable[[], dict[str, object]] = dict,
 ) -> MetricsOutput:
     """Count matches and churn.
 
-    ``load_optional`` returns the optional `MetricInputs` fields that this run has.
-    It is called only when the stage runs.
+    ``load_optional_inputs`` returns the optional `MetricInputs` fields that this run
+    has. It is called only when the stage runs.
     """
     inputs = MetricInputs(
         raw.candidates,
@@ -144,11 +146,13 @@ def metrics(
         matched.matches,
         assigned.final,
         provider,
-        **load_optional(),
+        **load_optional_inputs(),
     )
     rows = compute_metrics(inputs, METRICS)
     spark = raw.candidates.sparkSession
-    return MetricsOutput(to_frame(spark, rows, THEME, FEATURE_TYPE, provider))
+    return MetricsOutput(
+        build_metrics_dataframe(spark, rows, THEME, FEATURE_TYPE, provider)
+    )
 
 
 def run(spark: SparkSession, config: RunConfig) -> None:
@@ -198,7 +202,9 @@ def run(spark: SparkSession, config: RunConfig) -> None:
         matched,
         assigned,
         config.provider,
-        load_optional=lambda: load_optional_inputs(spark, config, FEATURE_TYPE),
+        load_optional_inputs=lambda: load_optional_metric_inputs(
+            spark, config, FEATURE_TYPE
+        ),
     )
 
 

@@ -10,10 +10,10 @@ from pyspark.sql import Window
 from pyspark.sql import functions as F
 
 if TYPE_CHECKING:
-    from pyspark.sql import DataFrame
+    from pyspark.sql import Column, DataFrame
 
 CANDIDATE = "candidate"
-NOMATCH = "nomatch"
+NO_MATCH = "nomatch"
 BASELINE_BASELINE = "baseline_baseline"
 CANDIDATE_CANDIDATE = "candidate_candidate"
 CANDIDATE_BASELINE = "candidate_baseline"
@@ -31,7 +31,7 @@ STRING_COLUMNS = (
 )
 
 
-def coalesce_schema(matches: DataFrame) -> DataFrame:
+def coalesce_match_schema(matches: DataFrame) -> DataFrame:
     """Add the match columns that ``matches`` lacks, with null (or default) values."""
     for name in STRING_COLUMNS:
         if name not in matches.columns:
@@ -43,85 +43,104 @@ def coalesce_schema(matches: DataFrame) -> DataFrame:
     return matches
 
 
-def with_base_active(matches: DataFrame, baseline: DataFrame) -> DataFrame:
+def add_base_active(matches: DataFrame, baseline: DataFrame) -> DataFrame:
     """Set ``base_active`` to the max ``active`` of the baseline ID, or 1 if unknown."""
-    active = baseline.groupBy(F.col("id").alias("_active_id")).agg(
+    active_by_id = baseline.groupBy(F.col("id").alias("_active_id")).agg(
         F.max("active").alias("_active")
     )
     return (
         matches.drop("base_active")
-        .join(active, F.col("base_id") == F.col("_active_id"), "left")
+        .join(active_by_id, F.col("base_id") == F.col("_active_id"), "left")
         .withColumn("base_active", F.coalesce("_active", F.lit(1)).cast("int"))
         .drop("_active_id", "_active")
     )
 
 
-def _is(column: str, value: str):
+def _column_equals(column_name: str, value: str) -> Column:
     # A null column never equals the value.
-    return F.coalesce(F.col(column) == value, F.lit(False))
+    return F.coalesce(F.col(column_name) == value, F.lit(False))
 
 
-def _flag_clusters(matches: DataFrame) -> DataFrame:
-    """Add ``_kind``: nomatch, baseline_only, candidate_only or best_match."""
-    w = Window.partitionBy("cluster_id")
-    size = F.count(F.lit(1)).over(w)
-    all_bb = F.sum(_is("match_sub_type", BASELINE_BASELINE).cast("int")).over(w) == size
-    all_cc = (
-        F.sum(_is("match_sub_type", CANDIDATE_CANDIDATE).cast("int")).over(w) == size
+def _classify_clusters(matches: DataFrame) -> DataFrame:
+    """Add ``_cluster_kind``: nomatch, baseline_only, candidate_only or best_match."""
+    cluster_window = Window.partitionBy("cluster_id")
+    cluster_size = F.count(F.lit(1)).over(cluster_window)
+    all_baseline_baseline = (
+        F.sum(_column_equals("match_sub_type", BASELINE_BASELINE).cast("int")).over(
+            cluster_window
+        )
+        == cluster_size
     )
-    kind = (
-        F.when((size == 1) & _is("match_type", NOMATCH), "nomatch")
-        .when(all_bb, "baseline_only")
-        .when(all_cc, "candidate_only")
+    all_candidate_candidate = (
+        F.sum(_column_equals("match_sub_type", CANDIDATE_CANDIDATE).cast("int")).over(
+            cluster_window
+        )
+        == cluster_size
+    )
+    cluster_kind = (
+        F.when(
+            (cluster_size == 1) & _column_equals("match_type", NO_MATCH),
+            "nomatch",
+        )
+        .when(all_baseline_baseline, "baseline_only")
+        .when(all_candidate_candidate, "candidate_only")
         .otherwise("best_match")
     )
-    return matches.withColumn("_kind", kind)
+    return matches.withColumn("_cluster_kind", cluster_kind)
 
 
-def _nomatch_winners(rows: DataFrame) -> DataFrame:
-    return rows.where(F.col("_kind") == "nomatch").select(
+def _select_no_match_winners(classified_matches: DataFrame) -> DataFrame:
+    return classified_matches.where(F.col("_cluster_kind") == "nomatch").select(
         "cluster_id", "id", F.lit(None).cast("string").alias("base_id")
     )
 
 
-def _candidate_only_winners(rows: DataFrame) -> DataFrame:
-    """The ID seen most often on either side, then by max score, then by ID."""
-    rows = rows.where(F.col("_kind") == "candidate_only")
-    sides = rows.select("cluster_id", "id", "composite_score").unionByName(
-        rows.select("cluster_id", F.col("base_id").alias("id"), "composite_score")
+def _select_best_inner_candidate(classified_matches: DataFrame) -> DataFrame:
+    """Select the ID seen most often on either side, then by max score, then by ID."""
+    candidate_pairs = classified_matches.where(
+        F.col("_cluster_kind") == "candidate_only"
+    )
+    sides = candidate_pairs.select("cluster_id", "id", "composite_score").unionByName(
+        candidate_pairs.select(
+            "cluster_id", F.col("base_id").alias("id"), "composite_score"
+        )
     )
     per_id = sides.groupBy("cluster_id", "id").agg(
-        F.count(F.lit(1)).alias("n"), F.max("composite_score").alias("score")
+        F.count(F.lit(1)).alias("occurrences"),
+        F.max("composite_score").alias("score"),
     )
     return (
         per_id.groupBy("cluster_id")
-        .agg(F.max(F.struct("n", "score", "id")).alias("w"))
+        .agg(F.max(F.struct("occurrences", "score", "id")).alias("winner"))
         .select(
             "cluster_id",
-            F.col("w.id").alias("id"),
+            F.col("winner.id").alias("id"),
             F.lit(None).cast("string").alias("base_id"),
         )
     )
 
 
-def _best_match_winners(rows: DataFrame) -> DataFrame:
-    """The baseline ID with the best (active, occurrences, score) and its best candidate.
+def _select_best_baseline_match(classified_matches: DataFrame) -> DataFrame:
+    """Select the baseline ID with best (active, occurrences, score) and candidate.
 
     A baseline ID without a candidate-baseline pair cannot win.
     """
-    rows = rows.where(F.col("_kind") == "best_match")
-    is_pair = _is("match_sub_type", CANDIDATE_BASELINE)
-    per_base = (
-        rows.groupBy("cluster_id", "base_id")
+    best_match_pairs = classified_matches.where(F.col("_cluster_kind") == "best_match")
+    is_candidate_baseline_pair = _column_equals("match_sub_type", CANDIDATE_BASELINE)
+    per_baseline_id = (
+        best_match_pairs.groupBy("cluster_id", "base_id")
         .agg(
             F.count(F.lit(1)).alias("occurrences"),
             F.max(
-                F.when(is_pair, F.struct("composite_score", "id", "base_active"))
+                F.when(
+                    is_candidate_baseline_pair,
+                    F.struct("composite_score", "id", "base_active"),
+                )
             ).alias("best"),
         )
         .where(F.col("best").isNotNull())
     )
-    ranked = per_base.select(
+    ranked = per_baseline_id.select(
         "cluster_id",
         "base_id",
         F.struct(
@@ -134,19 +153,23 @@ def _best_match_winners(rows: DataFrame) -> DataFrame:
     )
     return (
         ranked.groupBy("cluster_id")
-        .agg(F.max("rank").alias("w"))
+        .agg(F.max("rank").alias("winner"))
         .select(
-            "cluster_id", F.col("w.id").alias("id"), F.col("w.base_id").alias("base_id")
+            "cluster_id",
+            F.col("winner.id").alias("id"),
+            F.col("winner.base_id").alias("base_id"),
         )
     )
 
 
-def _side_ids(rows: DataFrame, candidates_only: bool = True) -> DataFrame:
-    """Distinct (cluster_id, id) on either side of a pair, optionally candidates only."""
-    left, right = rows, rows
+def _extract_pair_side_ids(
+    matches: DataFrame, candidates_only: bool = True
+) -> DataFrame:
+    """Extract distinct ``(cluster_id, id)`` from either side of each pair."""
+    left, right = matches, matches
     if candidates_only:
-        left = rows.where(F.col("record_type") == CANDIDATE)
-        right = rows.where(F.col("base_record_type") == CANDIDATE)
+        left = matches.where(F.col("record_type") == CANDIDATE)
+        right = matches.where(F.col("base_record_type") == CANDIDATE)
     return (
         left.select("cluster_id", "id")
         .unionByName(right.select("cluster_id", F.col("base_id").alias("id")))
@@ -154,18 +177,22 @@ def _side_ids(rows: DataFrame, candidates_only: bool = True) -> DataFrame:
     )
 
 
-def _join_cluster(left: DataFrame, right: DataFrame, how: str = "inner") -> DataFrame:
+def _join_on_cluster_id(
+    left: DataFrame, right: DataFrame, how: str = "inner"
+) -> DataFrame:
     """Join on ``cluster_id``, treating a null ``cluster_id`` as one cluster."""
-    joined = left.alias("l").join(
-        right.alias("r"), F.col("l.cluster_id").eqNullSafe(F.col("r.cluster_id")), how
+    joined = left.alias("left").join(
+        right.alias("right"),
+        F.col("left.cluster_id").eqNullSafe(F.col("right.cluster_id")),
+        how,
     )
-    return joined.drop(F.col("r.cluster_id")) if how != "left_anti" else joined
+    return joined.drop(F.col("right.cluster_id")) if how != "left_anti" else joined
 
 
-def select_winners(
+def select_cluster_winners_and_fallout(
     matches: DataFrame, baseline: DataFrame
 ) -> tuple[DataFrame, DataFrame]:
-    """Pick one winner per cluster.
+    """Select one winning candidate per cluster and map losing candidates to it.
 
     Args:
         matches: Match pairs with a ``cluster_id``.
@@ -183,40 +210,47 @@ def select_winners(
             mixes baseline and candidate records without a candidate-baseline pair,
             and its candidates would otherwise be in neither output.
     """
-    rows = _flag_clusters(with_base_active(coalesce_schema(matches), baseline))
-    by_cluster = (
-        _nomatch_winners(rows)
-        .unionByName(_candidate_only_winners(rows))
-        .unionByName(_best_match_winners(rows))
+    classified = _classify_clusters(
+        add_base_active(coalesce_match_schema(matches), baseline)
+    )
+    winners_by_cluster = (
+        _select_no_match_winners(classified)
+        .unionByName(_select_best_inner_candidate(classified))
+        .unionByName(_select_best_baseline_match(classified))
         .cache()
     )
-    orphans = [
-        r["cluster_id"]
-        for r in _join_cluster(
-            _side_ids(rows.where(F.col("_kind") == "best_match"))
+    orphan_clusters = [
+        row["cluster_id"]
+        for row in _join_on_cluster_id(
+            _extract_pair_side_ids(
+                classified.where(F.col("_cluster_kind") == "best_match")
+            )
             .select("cluster_id")
             .distinct(),
-            by_cluster,
+            winners_by_cluster,
             "left_anti",
         )
         .limit(5)
         .collect()
     ]
-    if orphans:
-        raise ValueError(f"clusters without a winner, for example {orphans}")
+    if orphan_clusters:
+        raise ValueError(f"clusters without a winner, for example {orphan_clusters}")
     # Candidate-only clusters fold in every ID, whatever its record type.
-    losers = _side_ids(
-        rows.where(F.col("_kind").isin("nomatch", "best_match"))
+    candidate_ids_by_cluster = _extract_pair_side_ids(
+        classified.where(F.col("_cluster_kind").isin("nomatch", "best_match"))
     ).unionByName(
-        _side_ids(rows.where(F.col("_kind") == "candidate_only"), candidates_only=False)
+        _extract_pair_side_ids(
+            classified.where(F.col("_cluster_kind") == "candidate_only"),
+            candidates_only=False,
+        )
     )
     fallout = (
-        _join_cluster(
-            losers,
-            by_cluster.select("cluster_id", F.col("id").alias("duplicate_of")),
+        _join_on_cluster_id(
+            candidate_ids_by_cluster,
+            winners_by_cluster.select("cluster_id", F.col("id").alias("duplicate_of")),
         )
         .where(~F.col("id").eqNullSafe(F.col("duplicate_of")))
         .select("id", "duplicate_of")
         .distinct()
     )
-    return by_cluster.select("id", "base_id"), fallout
+    return winners_by_cluster.select("id", "base_id"), fallout

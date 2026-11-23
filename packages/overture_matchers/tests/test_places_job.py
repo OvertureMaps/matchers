@@ -108,15 +108,19 @@ def test_run_chains_stage_outputs_and_skips_on_rerun(spark, params, monkeypatch)
         return AssignIdsOutput(spark.range(6), spark.range(7))
 
     def metrics(
-        raw, prepared, matched, ids, provider, load_optional=dict
+        raw, prepared, matched, assigned, provider, load_optional_inputs=dict
     ) -> MetricsOutput:
-        calls["metrics"] = (ids.final.count(), ids.fallout.count(), load_optional())
+        calls["metrics"] = (
+            assigned.final.count(),
+            assigned.fallout.count(),
+            load_optional_inputs(),
+        )
         return MetricsOutput(spark.range(1))
 
-    def load_optional_inputs(spark, config, feature_type):
+    def load_optional_metric_inputs(spark, config, feature_type):
         return {"loaded": True}
 
-    for fake in (setup, matching, assign_ids, metrics, load_optional_inputs):
+    for fake in (setup, matching, assign_ids, metrics, load_optional_metric_inputs):
         monkeypatch.setattr(job, fake.__name__, fake)
     config = job.RunConfig.from_params(
         params | {"matchHistory": "false", "blockingResolution": 14}
@@ -240,7 +244,7 @@ def test_assign_ids_and_metrics_stages(spark):
         matched,
         assigned,
         "acme",
-        load_optional=lambda: {"scores": scores},
+        load_optional_inputs=lambda: {"scores": scores},
     )
     rows = {
         (r["metric_id"], r["sub_partition"]): r["value"] for r in out.metrics.collect()

@@ -14,18 +14,18 @@ from overture_matchers.metrics import (
     Metric,
     MetricInputs,
     MetricRow,
-    percentage,
+    compute_percentage,
     round_half_up,
 )
 from overture_matchers.places.selection import (
     BASELINE_BASELINE,
     CANDIDATE,
     CANDIDATE_CANDIDATE,
-    NOMATCH,
+    NO_MATCH,
 )
 
 if TYPE_CHECKING:
-    from pyspark.sql import DataFrame
+    from pyspark.sql import Column, DataFrame, Row
 
 SCORE_BUCKETS = (
     ("clear_no_match", 0.0, 0.1),
@@ -37,24 +37,28 @@ SCORE_BUCKETS = (
 )
 
 
-def _num(value) -> float:
+def _coerce_to_float(value: object) -> float:
     return 0.0 if value is None else float(value)
 
 
-def _pct(column: str, q: float):
-    return F.expr(f"percentile({column}, {q})")
+def _compute_exact_percentile(column_name: str, quantile: float) -> Column:
+    return F.expr(f"percentile({column_name}, {quantile})")
 
 
-def _stat_rows(
-    metric_id: str, row, names: dict[str, str], sub: str = ""
+def _build_stat_metric_rows(
+    metric_id_prefix: str,
+    row: Row,
+    suffix_by_field: dict[str, str],
+    sub_partition: str = "",
 ) -> list[MetricRow]:
-    """One row per entry of ``names``, which maps a Row field to a metric suffix."""
+    """Build one metric row per entry of ``suffix_by_field``."""
     return [
-        (metric_id + suffix, _num(row[field]), sub) for field, suffix in names.items()
+        (metric_id_prefix + suffix, _coerce_to_float(row[field]), sub_partition)
+        for field, suffix in suffix_by_field.items()
     ]
 
 
-def _distinct_ids(pairs: DataFrame) -> int:
+def _count_distinct_pair_ids(pairs: DataFrame) -> int:
     return (
         pairs.select("id")
         .union(pairs.select(F.col("base_id").alias("id")))
@@ -63,45 +67,49 @@ def _distinct_ids(pairs: DataFrame) -> int:
     )
 
 
-def match_type_distribution(inp: MetricInputs) -> list[MetricRow]:
-    """Pairs by sub-type, and the share of IDs that have duplicates on their own side."""
+def compute_match_type_distribution(inputs: MetricInputs) -> list[MetricRow]:
+    """Compute pairs by sub-type, and the share of IDs duplicated on their own side."""
     by_type = (
-        inp.matches.groupBy("match_sub_type").agg(F.count("id").alias("n")).collect()
+        inputs.matches.groupBy("match_sub_type")
+        .agg(F.count("id").alias("count"))
+        .collect()
     )
-    candidate_dups = _distinct_ids(
-        inp.matches.where(F.col("match_sub_type") == CANDIDATE_CANDIDATE)
+    candidate_duplicate_count = _count_distinct_pair_ids(
+        inputs.matches.where(F.col("match_sub_type") == CANDIDATE_CANDIDATE)
     )
-    baseline_dups = _distinct_ids(
-        inp.matches.where(F.col("match_sub_type") == BASELINE_BASELINE)
+    baseline_duplicate_count = _count_distinct_pair_ids(
+        inputs.matches.where(F.col("match_sub_type") == BASELINE_BASELINE)
     )
     return [
-        ("MatchTypeDistribution", float(r["n"]), r["match_sub_type"] or "")
-        for r in by_type
+        ("MatchTypeDistribution", float(row["count"]), row["match_sub_type"] or "")
+        for row in by_type
     ] + [
-        ("MatchCandidateDuplicates", float(candidate_dups), ""),
-        ("MatchBaselineDuplicates", float(baseline_dups), ""),
+        ("MatchCandidateDuplicates", float(candidate_duplicate_count), ""),
+        ("MatchBaselineDuplicates", float(baseline_duplicate_count), ""),
         (
             "MatchCandidateDuplicateShare",
-            percentage(candidate_dups, inp.prepared_candidates.count()),
+            compute_percentage(
+                candidate_duplicate_count, inputs.prepared_candidates.count()
+            ),
             "",
         ),
         (
             "MatchBaselineDuplicateShare",
-            percentage(baseline_dups, inp.baseline.count()),
+            compute_percentage(baseline_duplicate_count, inputs.baseline.count()),
             "",
         ),
     ]
 
 
-def clusters(matches: DataFrame) -> DataFrame:
-    """One row per cluster.
+def summarize_match_clusters(matches: DataFrame) -> DataFrame:
+    """Summarize ``matches`` to one row per cluster.
 
     Columns: ``cluster_id``, ``type`` (baseline-only, candidates-only, no-match or
     match), ``entity_count`` (distinct IDs on either side, a null ``base_id``
     included), ``candidate_ids``, ``candidate_count`` and ``first_id``.
     """
 
-    def all_of(sub_type: str):
+    def all_rows_have_sub_type(sub_type: str) -> Column:
         return F.sum((F.col("match_sub_type") == sub_type).cast("int")) == F.count(
             F.lit(1)
         )
@@ -109,25 +117,26 @@ def clusters(matches: DataFrame) -> DataFrame:
     # Structs keep a null candidate ID apart from a non-candidate side.
     candidate_side = F.array(
         F.struct(
-            (F.col("record_type") == CANDIDATE).alias("c"), F.col("id").alias("v")
+            (F.col("record_type") == CANDIDATE).alias("is_candidate"),
+            F.col("id").alias("entity_id"),
         ),
         F.struct(
-            (F.col("base_record_type") == CANDIDATE).alias("c"),
-            F.col("base_id").alias("v"),
+            (F.col("base_record_type") == CANDIDATE).alias("is_candidate"),
+            F.col("base_id").alias("entity_id"),
         ),
     )
     return (
         matches.groupBy("cluster_id")
         .agg(
-            F.when(all_of(BASELINE_BASELINE), "baseline-only")
-            .when(all_of(CANDIDATE_CANDIDATE), "candidates-only")
-            .when(all_of(NOMATCH), "no-match")
+            F.when(all_rows_have_sub_type(BASELINE_BASELINE), "baseline-only")
+            .when(all_rows_have_sub_type(CANDIDATE_CANDIDATE), "candidates-only")
+            .when(all_rows_have_sub_type(NO_MATCH), "no-match")
             .otherwise("match")
             .alias("type"),
             F.array_distinct(F.flatten(F.collect_list(F.array("id", "base_id")))).alias(
                 "entities"
             ),
-            F.flatten(F.collect_list(candidate_side)).alias("cands"),
+            F.flatten(F.collect_list(candidate_side)).alias("candidate_entries"),
             F.min("id").alias("first_id"),
         )
         .select(
@@ -135,7 +144,10 @@ def clusters(matches: DataFrame) -> DataFrame:
             "type",
             F.size("entities").alias("entity_count"),
             F.array_distinct(
-                F.transform(F.filter("cands", lambda x: x["c"]), lambda x: x["v"])
+                F.transform(
+                    F.filter("candidate_entries", lambda entry: entry["is_candidate"]),
+                    lambda entry: entry["entity_id"],
+                )
             ).alias("candidate_ids"),
             "first_id",
         )
@@ -143,23 +155,23 @@ def clusters(matches: DataFrame) -> DataFrame:
     )
 
 
-# simplification: keeps the last matches table's clusters cached until the next call.
+# Keeps the last matches table's clusters cached until the next call.
 @lru_cache(maxsize=1)
-def _cached_clusters(matches: DataFrame) -> DataFrame:
-    return clusters(matches).cache()
+def _get_cached_match_clusters(matches: DataFrame) -> DataFrame:
+    return summarize_match_clusters(matches).cache()
 
 
-def _size_stats(column: str) -> list[F.Column]:
-    c = F.col(column)
+def _build_size_stat_columns(column_name: str) -> list[Column]:
+    column = F.col(column_name)
     return [
-        _pct(column, 0.99).alias("p99"),
-        _pct(column, 0.75).alias("p75"),
-        _pct(column, 0.5).alias("p50"),
-        _pct(column, 0.25).alias("p25"),
-        F.avg(c).alias("avg"),
-        F.stddev(c).alias("std"),
-        F.min(c).alias("min"),
-        F.max(c).alias("max"),
+        _compute_exact_percentile(column_name, 0.99).alias("p99"),
+        _compute_exact_percentile(column_name, 0.75).alias("p75"),
+        _compute_exact_percentile(column_name, 0.5).alias("p50"),
+        _compute_exact_percentile(column_name, 0.25).alias("p25"),
+        F.avg(column).alias("avg"),
+        F.stddev(column).alias("std"),
+        F.min(column).alias("min"),
+        F.max(column).alias("max"),
     ]
 
 
@@ -175,56 +187,65 @@ CLUSTER_SIZE_SUFFIXES = {
 }
 
 
-def cluster_stats(inp: MetricInputs) -> list[MetricRow]:
-    """Clusters by type, singleton rate, duplicated IDs and cluster size profiles."""
-    cl = _cached_clusters(inp.matches)
+def compute_cluster_stats(inputs: MetricInputs) -> list[MetricRow]:
+    """Compute clusters by type, singleton rate, duplicated IDs and size profiles."""
+    clusters_df = _get_cached_match_clusters(inputs.matches)
     by_type = {
-        r["type"]: r["n"]
-        for r in cl.groupBy("type").agg(F.count(F.lit(1)).alias("n")).collect()
+        row["type"]: row["count"]
+        for row in clusters_df.groupBy("type")
+        .agg(F.count(F.lit(1)).alias("count"))
+        .collect()
     }
-    relevant = cl.where(F.col("type").isin("match", "candidates-only"))
-    sizes = relevant.agg(*_size_stats("entity_count")).first()
-    candidate_sizes = relevant.agg(*_size_stats("candidate_count")).first()
-    duplicated = cl.where(F.col("entity_count") - F.col("candidate_count") > 1).count()
+    relevant = clusters_df.where(F.col("type").isin("match", "candidates-only"))
+    sizes = relevant.agg(*_build_size_stat_columns("entity_count")).first()
+    candidate_sizes = relevant.agg(*_build_size_stat_columns("candidate_count")).first()
+    duplicated = clusters_df.where(
+        F.col("entity_count") - F.col("candidate_count") > 1
+    ).count()
     rows: list[MetricRow] = [
-        ("MatchClusterCountByType", float(n), t) for t, n in by_type.items()
+        ("MatchClusterCountByType", float(count), cluster_type)
+        for cluster_type, count in by_type.items()
     ]
     rows.append(
         (
             "MatchSingletonRate",
-            percentage(by_type.get("no-match", 0), inp.prepared_candidates.count()),
+            compute_percentage(
+                by_type.get("no-match", 0), inputs.prepared_candidates.count()
+            ),
             "",
         )
     )
     rows.append(("MatchDuplicatedIdCount", float(duplicated), ""))
-    rows += _stat_rows("MatchClusterSizeStats", sizes, CLUSTER_SIZE_SUFFIXES)
-    rows += _stat_rows(
+    rows += _build_stat_metric_rows(
+        "MatchClusterSizeStats", sizes, CLUSTER_SIZE_SUFFIXES
+    )
+    rows += _build_stat_metric_rows(
         "MatchClusterCandidateSizeStats", candidate_sizes, CLUSTER_SIZE_SUFFIXES
     )
     return rows
 
 
-def cluster_size_by_country(inp: MetricInputs) -> list[MetricRow]:
-    """Candidate count per cluster, profiled by the country of the cluster's smallest ID.
+def compute_cluster_size_by_country(inputs: MetricInputs) -> list[MetricRow]:
+    """Profile candidate count per cluster by the country of its smallest ID.
 
     An ID in both candidates and baseline has two country rows, so its cluster is
     counted once per row.
     """
-    countries = inp.prepared_candidates.select("id", "country").unionByName(
-        inp.prepared_baseline.select("id", "country")
+    countries = inputs.prepared_candidates.select("id", "country").unionByName(
+        inputs.prepared_baseline.select("id", "country")
     )
-    relevant = _cached_clusters(inp.matches).where(
+    relevant = _get_cached_match_clusters(inputs.matches).where(
         F.col("type").isin("match", "candidates-only")
     )
     stats = (
         relevant.join(countries, relevant["first_id"] == countries["id"])
         .groupBy("country")
         .agg(
-            _pct("candidate_count", 0.99).alias("p99"),
-            _pct("candidate_count", 0.95).alias("p95"),
-            _pct("candidate_count", 0.75).alias("p75"),
-            _pct("candidate_count", 0.5).alias("p50"),
-            _pct("candidate_count", 0.25).alias("p25"),
+            _compute_exact_percentile("candidate_count", 0.99).alias("p99"),
+            _compute_exact_percentile("candidate_count", 0.95).alias("p95"),
+            _compute_exact_percentile("candidate_count", 0.75).alias("p75"),
+            _compute_exact_percentile("candidate_count", 0.5).alias("p50"),
+            _compute_exact_percentile("candidate_count", 0.25).alias("p25"),
             F.max("candidate_count").alias("max"),
             F.min("candidate_count").alias("min"),
             F.avg("candidate_count").alias("avg"),
@@ -245,67 +266,71 @@ def cluster_size_by_country(inp: MetricInputs) -> list[MetricRow]:
     }
     rows: list[MetricRow] = []
     for row in stats:
-        rows += _stat_rows(
+        rows += _build_stat_metric_rows(
             "MatchClusterStatsByCountry", row, suffixes, row["country"] or ""
         )
     return rows
 
 
-def gers_uniqueness(inp: MetricInputs) -> list[MetricRow]:
-    """1 if every result has its own ID, else 0."""
-    unique = inp.results.count() == inp.results.select("id").distinct().count()
+def compute_gers_id_uniqueness(inputs: MetricInputs) -> list[MetricRow]:
+    """Return 1 if every result row has a distinct GERS ID, else 0."""
+    unique = inputs.results.count() == inputs.results.select("id").distinct().count()
     return [("MatchGERSIdUniquenessCheck", 1.0 if unique else 0.0, "")]
 
 
-def _candidate_feed(inp: MetricInputs) -> DataFrame:
-    """Candidates that setup did not already match through history."""
-    return inp.prepared_candidates.where(F.col("base_ids").isNull())
+def _filter_non_history_candidates(inputs: MetricInputs) -> DataFrame:
+    """Filter to candidates that setup did not already match through history."""
+    return inputs.prepared_candidates.where(F.col("base_ids").isNull())
 
 
-def _passed_blocking(feed: DataFrame, blocking: DataFrame) -> DataFrame:
-    """Feed records whose ID appears on either side of a blocking pair."""
-    ids = (
-        blocking.where(F.col("record_type") == CANDIDATE)
+def _filter_candidates_passing_blocking(
+    candidate_feed: DataFrame, blocking_pairs: DataFrame
+) -> DataFrame:
+    """Filter ``candidate_feed`` to IDs appearing on either side of ``blocking_pairs``."""
+    passing_ids = (
+        blocking_pairs.where(F.col("record_type") == CANDIDATE)
         .select("id")
         .union(
-            blocking.where(F.col("base_record_type") == CANDIDATE).select(
+            blocking_pairs.where(F.col("base_record_type") == CANDIDATE).select(
                 F.col("base_id").alias("id")
             )
         )
         .distinct()
     )
-    return feed.join(ids, "id", "left_semi")
+    return candidate_feed.join(passing_ids, "id", "left_semi")
 
 
-def blocking_metrics(inp: MetricInputs) -> list[MetricRow]:
-    """Pass and block rates of the candidate feed, and partners per candidate."""
-    if inp.blocking is None:
+def compute_blocking_metrics(inputs: MetricInputs) -> list[MetricRow]:
+    """Compute pass and block rates of the candidate feed, and partners per candidate."""
+    if inputs.blocking is None:
         return []
-    feed = _candidate_feed(inp)
-    total = feed.count()
-    passed = _passed_blocking(feed, inp.blocking).count()
+    candidate_feed = _filter_non_history_candidates(inputs)
+    total = candidate_feed.count()
+    passed = _filter_candidates_passing_blocking(
+        candidate_feed, inputs.blocking
+    ).count()
     blocked_rate = (total - passed) / total if total > 0 else 0.0
 
-    blocking = inp.blocking
+    blocking_pairs = inputs.blocking
     per_candidate = (
-        blocking.where(F.col("record_type") == CANDIDATE)
+        blocking_pairs.where(F.col("record_type") == CANDIDATE)
         .groupBy("id")
-        .agg(F.count("base_id").alias("n"))
+        .agg(F.count("base_id").alias("partner_count"))
         .union(
-            blocking.where(F.col("base_record_type") == CANDIDATE)
+            blocking_pairs.where(F.col("base_record_type") == CANDIDATE)
             .groupBy(F.col("base_id").alias("id"))
-            .agg(F.count("id").alias("n"))
+            .agg(F.count("id").alias("partner_count"))
         )
         .groupBy("id")
-        .agg(F.sum("n").alias("n"))
-        .join(feed.select("id"), "id")
+        .agg(F.sum("partner_count").alias("partner_count"))
+        .join(candidate_feed.select("id"), "id")
     )
     partners = per_candidate.agg(
-        F.avg("n").alias("mean"),
-        F.stddev("n").alias("std"),
-        _pct("n", 0.5).alias("median"),
-        _pct("n", 0.99).alias("p99"),
-        F.max("n").alias("max"),
+        F.avg("partner_count").alias("mean"),
+        F.stddev("partner_count").alias("std"),
+        _compute_exact_percentile("partner_count", 0.5).alias("median"),
+        _compute_exact_percentile("partner_count", 0.99).alias("p99"),
+        F.max("partner_count").alias("max"),
     ).first()
     rows: list[MetricRow] = [
         ("MatchBlockingTotalCandidates", float(total), ""),
@@ -313,128 +338,172 @@ def blocking_metrics(inp: MetricInputs) -> list[MetricRow]:
         ("MatchBlockingBlockedCandidates", float(total - passed), ""),
         ("MatchBlockingBlockedRate", blocked_rate, ""),
         ("MatchBlockingPassedRate", 1.0 - blocked_rate, ""),
-        ("MatchBlockingVolume", float(blocking.count()), ""),
+        ("MatchBlockingVolume", float(blocking_pairs.count()), ""),
     ]
     for stat in ("mean", "std", "median", "p99", "max"):
-        rows.append(("MatchBlockingClusterDistribution", _num(partners[stat]), stat))
+        rows.append(
+            ("MatchBlockingClusterDistribution", _coerce_to_float(partners[stat]), stat)
+        )
     return rows
 
 
-def match_rate(inp: MetricInputs) -> list[MetricRow]:
-    """Share of the candidate feed that matched a baseline record.
+def compute_match_rates(inputs: MetricInputs) -> list[MetricRow]:
+    """Compute the share of candidates that matched a baseline record.
 
     The ingest rate is over every candidate. The relative rate leaves out history
     matches and candidates that did not pass blocking, so it needs ``blocking``.
     """
-    candidates = inp.prepared_candidates.count()
-    history = inp.prepared_candidates.where(F.col("base_ids").isNotNull()).count()
+    candidates = inputs.prepared_candidates.count()
+    history = inputs.prepared_candidates.where(F.col("base_ids").isNotNull()).count()
     matched = (
-        _cached_clusters(inp.matches)
+        _get_cached_match_clusters(inputs.matches)
         .where(F.col("type") == "match")
         .select(F.explode("candidate_ids").alias("id"))
         .distinct()
         .count()
     )
-    rows: list[MetricRow] = [("MatchRateIngest", percentage(matched, candidates), "")]
-    if inp.blocking is not None:
-        passed = _passed_blocking(_candidate_feed(inp), inp.blocking).count()
-        rows.append(("MatchRateRelative", percentage(matched - history, passed), ""))
+    rows: list[MetricRow] = [
+        ("MatchRateIngest", compute_percentage(matched, candidates), "")
+    ]
+    if inputs.blocking is not None:
+        passed = _filter_candidates_passing_blocking(
+            _filter_non_history_candidates(inputs), inputs.blocking
+        ).count()
+        rows.append(
+            ("MatchRateRelative", compute_percentage(matched - history, passed), "")
+        )
     return rows
 
 
-def _z_score(current: float, mean: float, std: float) -> float:
-    return round_half_up((current - mean) / std, 4)
+def _compute_z_score(
+    current_mean: float,
+    baseline_mean: float,
+    baseline_standard_deviation: float,
+) -> float:
+    return round_half_up(
+        (current_mean - baseline_mean) / baseline_standard_deviation, 4
+    )
 
 
-def feature_stats(inp: MetricInputs) -> list[MetricRow]:
-    """Mean, std, median, p10 and p90 per scoring feature, and drift z-scores.
+def compute_feature_stats(inputs: MetricInputs) -> list[MetricRow]:
+    """Compute mean, std, median, p10 and p90 per scoring feature, and drift z-scores.
 
     Drift is measured against the model's reference dataset and against the previous
     run's metrics, when each is available.
     """
-    if inp.score_sample is None or not inp.feature_order:
+    if inputs.score_sample is None or not inputs.feature_order:
         return []
-    features = inp.feature_order
-    sample = inp.score_sample.select(
-        *(F.col(f).cast("double").alias(f) for f in features)
+    feature_names = inputs.feature_order
+    sample = inputs.score_sample.select(
+        *(
+            F.col(feature_name).cast("double").alias(feature_name)
+            for feature_name in feature_names
+        )
     )
-    aggs = []
-    for i, f in enumerate(features):
-        aggs += [
-            F.mean(f).alias(f"mean{i}"),
-            F.stddev(f).alias(f"std{i}"),
-            _pct(f, 0.5).alias(f"median{i}"),
-            _pct(f, 0.1).alias(f"p10{i}"),
-            _pct(f, 0.9).alias(f"p90{i}"),
+    aggregations = []
+    for index, feature_name in enumerate(feature_names):
+        aggregations += [
+            F.mean(feature_name).alias(f"mean{index}"),
+            F.stddev(feature_name).alias(f"std{index}"),
+            _compute_exact_percentile(feature_name, 0.5).alias(f"median{index}"),
+            _compute_exact_percentile(feature_name, 0.1).alias(f"p10{index}"),
+            _compute_exact_percentile(feature_name, 0.9).alias(f"p90{index}"),
         ]
-    row = sample.agg(*aggs).first()
+    row = sample.agg(*aggregations).first()
     rows: list[MetricRow] = []
-    means = {}
-    for i, f in enumerate(features):
-        means[f] = _num(row[f"mean{i}"])
+    current_means = {}
+    for index, feature_name in enumerate(feature_names):
+        current_means[feature_name] = _coerce_to_float(row[f"mean{index}"])
         for stat in ("mean", "std", "median", "p10", "p90"):
-            value = row[f"{stat}{i}"]
+            value = row[f"{stat}{index}"]
             if value is not None:
-                rows.append((f"MatchFeature.{f}", float(value), stat))
-    rows += _reference_z_scores(inp.reference, features, means)
-    rows += _previous_z_scores(inp.previous, features, means)
+                rows.append((f"MatchFeature.{feature_name}", float(value), stat))
+    rows += _compute_reference_z_scores(
+        inputs.reference_dataset, feature_names, current_means
+    )
+    rows += _compute_previous_release_z_scores(
+        inputs.previous_metrics, feature_names, current_means
+    )
     return rows
 
 
-def _reference_z_scores(reference, features, means) -> list[MetricRow]:
-    if reference is None:
+def _compute_reference_z_scores(
+    reference_dataset: DataFrame | None,
+    feature_names: tuple[str, ...],
+    current_means: dict[str, float],
+) -> list[MetricRow]:
+    if reference_dataset is None:
         return []
-    available = [f for f in features if f in reference.columns]
-    if not available:
+    available_features = [
+        feature_name
+        for feature_name in feature_names
+        if feature_name in reference_dataset.columns
+    ]
+    if not available_features:
         return []
-    aggs = []
-    for i, f in enumerate(available):
-        c = F.col(f).cast("double")
-        aggs += [F.avg(c).alias(f"mean{i}"), F.stddev(c).alias(f"std{i}")]
-    row = reference.agg(*aggs).first()
+    aggregations = []
+    for index, feature_name in enumerate(available_features):
+        feature_column = F.col(feature_name).cast("double")
+        aggregations += [
+            F.avg(feature_column).alias(f"mean{index}"),
+            F.stddev(feature_column).alias(f"std{index}"),
+        ]
+    row = reference_dataset.agg(*aggregations).first()
     rows = []
-    for i, f in enumerate(available):
-        std = _num(row[f"std{i}"])
-        if std > 0:
+    for index, feature_name in enumerate(available_features):
+        standard_deviation = _coerce_to_float(row[f"std{index}"])
+        if standard_deviation > 0:
             rows.append(
                 (
                     "MatchFeatureZScore",
-                    _z_score(means[f], _num(row[f"mean{i}"]), std),
-                    f,
+                    _compute_z_score(
+                        current_means[feature_name],
+                        _coerce_to_float(row[f"mean{index}"]),
+                        standard_deviation,
+                    ),
+                    feature_name,
                 )
             )
     return rows
 
 
-def _previous_z_scores(previous, features, means) -> list[MetricRow]:
-    if previous is None:
+def _compute_previous_release_z_scores(
+    previous_metrics: DataFrame | None,
+    feature_names: tuple[str, ...],
+    current_means: dict[str, float],
+) -> list[MetricRow]:
+    if previous_metrics is None:
         return []
     prefix = "MatchFeature."
-    stats: dict[str, dict[str, float]] = {}
-    for r in previous.where(F.col("metric_id").startswith(prefix)).collect():
-        stats.setdefault(r["metric_id"][len(prefix) :], {})[r["sub_partition"]] = float(
-            r["value"]
-        )
+    stats_by_feature: dict[str, dict[str, float]] = {}
+    for row in previous_metrics.where(F.col("metric_id").startswith(prefix)).collect():
+        stats_by_feature.setdefault(row["metric_id"][len(prefix) :], {})[
+            row["sub_partition"]
+        ] = float(row["value"])
     rows = []
-    for f in features:
-        prev = stats.get(f)
-        if prev is not None and prev.get("std", 0.0) > 0:
+    for feature_name in feature_names:
+        previous_stats = stats_by_feature.get(feature_name)
+        if previous_stats is not None and previous_stats.get("std", 0.0) > 0:
             rows.append(
                 (
                     "MatchFeatureZScorePrevRelease",
-                    _z_score(means[f], prev.get("mean", 0.0), prev["std"]),
-                    f,
+                    _compute_z_score(
+                        current_means[feature_name],
+                        previous_stats.get("mean", 0.0),
+                        previous_stats["std"],
+                    ),
+                    feature_name,
                 )
             )
     return rows
 
 
-def score_distribution(inp: MetricInputs) -> list[MetricRow]:
-    """Pairs, and their share, in each ``composite_score`` bucket."""
-    if inp.scores is None:
+def compute_score_distribution(inputs: MetricInputs) -> list[MetricRow]:
+    """Compute pair counts and shares in each ``composite_score`` bucket."""
+    if inputs.scores is None:
         return []
     score = F.col("composite_score")
-    row = inp.scores.agg(
+    row = inputs.scores.agg(
         F.count(F.lit(1)).alias("total"),
         *(
             F.count(F.when((score >= low) & (score < high), 1)).alias(name)
@@ -445,20 +514,21 @@ def score_distribution(inp: MetricInputs) -> list[MetricRow]:
     if total == 0:
         return []
     counts = [(name, float(row[name])) for name, _, _ in SCORE_BUCKETS]
-    return [("MatchScoreDistribution", n, name) for name, n in counts] + [
-        ("MatchScoreDistributionShare", n / total * 100, name) for name, n in counts
+    return [("MatchScoreDistribution", count, name) for name, count in counts] + [
+        ("MatchScoreDistributionShare", count / total * 100, name)
+        for name, count in counts
     ]
 
 
 PLACES_METRICS: tuple[tuple[str, Metric], ...] = (
-    ("Places Match Type Distribution", match_type_distribution),
-    ("Places Cluster Stats", cluster_stats),
-    ("Cluster Sizes By Country", cluster_size_by_country),
-    ("GERS ID Uniqueness", gers_uniqueness),
-    ("Places Blocking Metrics", blocking_metrics),
-    ("Places Match Rates", match_rate),
-    ("Places Feature Stats", feature_stats),
-    ("Places Score Distribution", score_distribution),
+    ("Places Match Type Distribution", compute_match_type_distribution),
+    ("Places Cluster Stats", compute_cluster_stats),
+    ("Cluster Sizes By Country", compute_cluster_size_by_country),
+    ("GERS ID Uniqueness", compute_gers_id_uniqueness),
+    ("Places Blocking Metrics", compute_blocking_metrics),
+    ("Places Match Rates", compute_match_rates),
+    ("Places Feature Stats", compute_feature_stats),
+    ("Places Score Distribution", compute_score_distribution),
 )
 
 METRICS = SHARED_METRICS + PLACES_METRICS
