@@ -75,13 +75,15 @@ class CountMinSketch:
     def estimate_count(self, value: str) -> int:
         """Upper bound of how many times ``value`` was added."""
         raw = value.encode("utf-8")
-        h1 = murmur3_32(raw, 0)
-        h2 = murmur3_32(raw, h1)
+        hash1 = murmur3_32(raw, 0)
+        hash2 = murmur3_32(raw, hash1)
         return min(
-            struct.unpack_from(">q", self._data, self._cell(i, h1, h2))[0]
-            for i in range(self._depth)
+            struct.unpack_from(
+                ">q", self._data, self._get_cell_byte_offset(row, hash1, hash2)
+            )[0]
+            for row in range(self._depth)
         )
 
-    def _cell(self, row: int, h1: int, h2: int) -> int:
-        column = abs(_to_signed_int32((h1 + row * h2) & _MASK)) % self._width
+    def _get_cell_byte_offset(self, row: int, hash1: int, hash2: int) -> int:
+        column = abs(_to_signed_int32((hash1 + row * hash2) & _MASK)) % self._width
         return self._table_start + 8 * (row * self._width + column)

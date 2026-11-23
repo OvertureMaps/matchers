@@ -15,7 +15,7 @@ CANDIDATE = "candidate"
 BASELINE = "baseline"
 
 
-def history_pairs(candidates: DataFrame) -> DataFrame:
+def generate_history_pairs(candidates: DataFrame) -> DataFrame:
     """One accepted pair per baseline ID in a candidate's ``base_ids``.
 
     Setup fills ``base_ids`` (or leaves it null when history matching is off),
