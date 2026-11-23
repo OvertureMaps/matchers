@@ -44,12 +44,12 @@ class PlacesModel:
     Attributes:
         blocking_features: Blocking features in booster order.
         blocking_threshold: Smallest blocking score that keeps a pair.
-        blocking_radius_m: Largest distance between the places of a pair.
+        blocking_radius_meters: Largest distance in meters between the places of a pair.
     """
 
     blocking_features: tuple[str, ...]
     blocking_threshold: float
-    blocking_radius_m: float
+    blocking_radius_meters: float
 
     @classmethod
     def load(cls, spark: SparkSession, model_jar: str) -> PlacesModel:
@@ -70,101 +70,113 @@ class PlacesModel:
             ValueError: The blocking feature order names a feature that
                 ``features.py`` does not produce.
         """
-        order = tuple(config["feature_order"])
-        unknown = [f for f in order if f not in features.BLOCKING_FEATURES]
-        if unknown:
+        feature_order = tuple(config["feature_order"])
+        unknown_features = [
+            feature_name
+            for feature_name in feature_order
+            if feature_name not in features.BLOCKING_FEATURES
+        ]
+        if unknown_features:
             raise ValueError(
-                f"blocking feature_order needs {unknown}, but features.py produces "
-                f"only {sorted(features.BLOCKING_FEATURES)}"
+                f"blocking feature_order needs {unknown_features}, but features.py "
+                f"produces only {sorted(features.BLOCKING_FEATURES)}"
             )
         return cls(
-            blocking_features=order,
+            blocking_features=feature_order,
             blocking_threshold=float(config["prediction_threshold"]),
-            blocking_radius_m=float(config["spatial_radius_m"]),
+            blocking_radius_meters=float(config["spatial_radius_m"]),
         )
 
 
-def _read_resource(resource: str, jar_name: str) -> bytes:
+def _read_jar_resource(resource_path: str, jar_name: str) -> bytes:
     with zipfile.ZipFile(SparkFiles.get(jar_name)) as jar:
-        return jar.read(resource)
+        return jar.read(resource_path)
 
 
 @cache
-def load_booster(jar_name: str, resource: str):
-    """The XGBoost booster stored at ``resource`` in the jar. It predicts on one thread."""
+def load_xgboost_booster(jar_name: str, resource_path: str):
+    """The XGBoost booster stored at ``resource_path`` in the jar. It predicts on one thread."""
     import xgboost
 
-    model = _read_resource(resource, jar_name)
+    model_bytes = _read_jar_resource(resource_path, jar_name)
     booster = xgboost.Booster({"nthread": 1})
-    booster.load_model(bytearray(model))
+    booster.load_model(bytearray(model_bytes))
     return booster
 
 
-def check_xgboost_version(model: bytes, installed: str) -> None:
-    """Raise unless ``installed`` XGBoost reads the JSON booster ``model`` as written.
+def check_xgboost_version(model_bytes: bytes, installed_version: str) -> None:
+    """Raise unless ``installed_version`` XGBoost reads the JSON booster ``model_bytes`` as written.
 
     XGBoost reads models from older versions only. An older reader can misread
     newer fields and silently shift every score.
     """
     try:
-        writer = tuple(json.loads(model)["version"][:2])
-    except ValueError as e:
-        raise RuntimeError("The booster must be saved as XGBoost JSON.") from e
-    reader = tuple(int(part) for part in installed.split(".")[:2])
-    if reader < writer or reader[0] != writer[0]:
+        writer_version = tuple(json.loads(model_bytes)["version"][:2])
+    except ValueError as error:
+        raise RuntimeError("The booster must be saved as XGBoost JSON.") from error
+    reader_version = tuple(int(part) for part in installed_version.split(".")[:2])
+    if reader_version < writer_version or reader_version[0] != writer_version[0]:
         raise RuntimeError(
-            f"The model was saved by XGBoost {writer[0]}.{writer[1]}, "
-            f"but XGBoost {installed} is installed. "
-            f"Install XGBoost {writer[0]}.x at {writer[0]}.{writer[1]} or newer."
+            f"The model was saved by XGBoost {writer_version[0]}.{writer_version[1]}, "
+            f"but XGBoost {installed_version} is installed. "
+            f"Install XGBoost {writer_version[0]}.x at {writer_version[0]}.{writer_version[1]} or newer."
         )
 
 
 @cache
-def load_name_idf(jar_name: str) -> tuple[CountMinSketch, int]:
+def load_name_idf_sketch(jar_name: str) -> tuple[CountMinSketch, int]:
     """The name token sketch and the number of documents it counted."""
-    table = pq.read_table(io.BytesIO(_read_resource(NAME_SKETCH_RESOURCE, jar_name)))
+    table = pq.read_table(
+        io.BytesIO(_read_jar_resource(NAME_SKETCH_RESOURCE, jar_name))
+    )
     row = table.to_pylist()[0]
     return CountMinSketch(row["cms_bytes"]), row["num_docs"]
 
 
-def name_idf(
-    sketch: CountMinSketch, num_docs: int, tokens: list[str] | None
+def compute_name_idf(
+    sketch: CountMinSketch, num_documents: int, tokens: list[str] | None
 ) -> dict[str, float]:
     """Inverse document frequency of each distinct token. Null gives an empty map."""
     return {
-        t: math.log(num_docs / max(1, sketch.estimate_count(t))) + 1.0
-        for t in tokens or ()
-        if t is not None
+        token: math.log(num_documents / max(1, sketch.estimate_count(token))) + 1.0
+        for token in tokens or ()
+        if token is not None
     }
 
 
-def name_idf_udf(jar_name: str) -> Callable[[Column], Column]:
-    """``name_idf`` over an array-of-string column, with the shipped jar's sketch."""
+def bind_name_idf_udf(jar_name: str) -> Callable[[Column], Column]:
+    """Bind ``compute_name_idf`` over an array-of-string column with the shipped jar's sketch."""
 
-    def idf_map(tokens: list[str] | None) -> dict[str, float]:
-        return name_idf(*load_name_idf(jar_name), tokens)
+    def compute_idf_map(tokens: list[str] | None) -> dict[str, float]:
+        return compute_name_idf(*load_name_idf_sketch(jar_name), tokens)
 
-    return F.udf(idf_map, MapType(StringType(), DoubleType(), False))
+    return F.udf(compute_idf_map, MapType(StringType(), DoubleType(), False))
 
 
-def predict(booster, columns: Sequence[pd.Series]) -> pd.Series:
+def predict_match_probability(
+    booster, feature_columns: Sequence[pd.Series]
+) -> pd.Series:
     """Probability of the positive class for each row. NaN means missing."""
     import numpy as np
 
-    matrix = np.column_stack(columns).astype(np.float32)
+    matrix = np.column_stack(feature_columns).astype(np.float32)
     return pd.Series(booster.inplace_predict(matrix).astype(np.float64))
 
 
-def predict_udf(jar_name: str, resource: str) -> Callable[[list[Column]], Column]:
-    """``predict`` over feature columns in booster order, with the shipped booster.
+def bind_match_probability_udf(
+    jar_name: str, resource_path: str
+) -> Callable[[list[Column]], Column]:
+    """Bind ``predict_match_probability`` over feature columns in booster order.
 
     Args:
         jar_name: File name of the shipped model jar.
-        resource: Booster path inside the jar.
+        resource_path: Booster path inside the jar.
     """
 
-    def score(*columns: pd.Series) -> pd.Series:
-        return predict(load_booster(jar_name, resource), columns)
+    def score_batch(*feature_columns: pd.Series) -> pd.Series:
+        return predict_match_probability(
+            load_xgboost_booster(jar_name, resource_path), feature_columns
+        )
 
-    udf = F.pandas_udf(score, DoubleType())
-    return lambda inputs: udf(*inputs)
+    udf = F.pandas_udf(score_batch, DoubleType())
+    return lambda feature_inputs: udf(*feature_inputs)

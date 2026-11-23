@@ -20,7 +20,7 @@ _UNAVAILABLE = -1.0
 _PHONE_SUFFIX_LENGTH = 6
 
 
-def name_similarity() -> Column:
+def calculate_name_similarity() -> Column:
     """One minus the edit distance over the longer length, with 1.0 for two empty names."""
     left = F.coalesce(F.col("name_clean"), F.lit(""))
     right = F.coalesce(F.col("base_name_clean"), F.lit(""))
@@ -30,13 +30,13 @@ def name_similarity() -> Column:
     )
 
 
-def _equal_or_unavailable(left: str, right: str, equal: Column | None = None) -> Column:
+def _calculate_equality_or_unavailable(
+    left_column: str, right_column: str, equality_condition: Column | None = None
+) -> Column:
     """1.0 or 0.0 for present values, -1.0 when either side is null or empty."""
-    left_col, right_col = F.col(left), F.col(right)
-    unavailable = (
-        left_col.isNull() | right_col.isNull() | (left_col == "") | (right_col == "")
-    )
-    same = equal if equal is not None else left_col == right_col
+    left, right = F.col(left_column), F.col(right_column)
+    unavailable = left.isNull() | right.isNull() | (left == "") | (right == "")
+    same = equality_condition if equality_condition is not None else left == right
     return (
         F.when(unavailable, F.lit(_UNAVAILABLE))
         .when(same, F.lit(1.0))
@@ -44,7 +44,7 @@ def _equal_or_unavailable(left: str, right: str, equal: Column | None = None) ->
     )
 
 
-def phone_number_similarity_availability() -> Column:
+def calculate_phone_number_similarity_availability() -> Column:
     """Phone match, from the whole number or, without both countries, its last digits."""
     left, right = F.col("normalized_phone"), F.col("base_normalized_phone")
     country_unknown = (
@@ -56,19 +56,19 @@ def phone_number_similarity_availability() -> Column:
     suffixes_match = left.substr(-_PHONE_SUFFIX_LENGTH, _PHONE_SUFFIX_LENGTH) == (
         right.substr(-_PHONE_SUFFIX_LENGTH, _PHONE_SUFFIX_LENGTH)
     )
-    return _equal_or_unavailable(
+    return _calculate_equality_or_unavailable(
         "normalized_phone",
         "base_normalized_phone",
         F.when(country_unknown, suffixes_match).otherwise(left == right),
     )
 
 
-def house_number_similarity_availability() -> Column:
+def calculate_house_number_similarity_availability() -> Column:
     """House number match."""
-    return _equal_or_unavailable("house_number", "base_house_number")
+    return _calculate_equality_or_unavailable("house_number", "base_house_number")
 
 
-def name_tfidf() -> Column:
+def calculate_name_tfidf_overlap() -> Column:
     """IDF weight of the shared name tokens over the smaller token count.
 
     Reads the ``name_idf`` maps of both sides.
@@ -82,10 +82,10 @@ def name_tfidf() -> Column:
 
 BLOCKING_FEATURES = {
     GEO_DISTANCE: lambda: F.col(GEO_DISTANCE),
-    "name_similarity": name_similarity,
-    "phone_number_similarity_availability": phone_number_similarity_availability,
-    "house_number_similarity_availability": house_number_similarity_availability,
-    "name_tfidf": name_tfidf,
+    "name_similarity": calculate_name_similarity,
+    "phone_number_similarity_availability": calculate_phone_number_similarity_availability,
+    "house_number_similarity_availability": calculate_house_number_similarity_availability,
+    "name_tfidf": calculate_name_tfidf_overlap,
 }
 # The columns each side of a pair carries for a feature. Every pair also has
 # GEO_DISTANCE.

@@ -33,14 +33,14 @@ from overture_matchers.metrics import (
     build_metrics_dataframe,
     compute_metrics,
 )
-from overture_matchers.places.blocking import SPATIAL_JOIN_CONF, blocking_pairs
+from overture_matchers.places.blocking import SPATIAL_JOIN_CONF, get_blocking_pairs
 from overture_matchers.places.metric_inputs import load_optional_metric_inputs
 from overture_matchers.places.metrics import METRICS
 from overture_matchers.places.model import (
     BLOCKING_BOOSTER_RESOURCE,
     PlacesModel,
-    name_idf_udf,
-    predict_udf,
+    bind_match_probability_udf,
+    bind_name_idf_udf,
 )
 from overture_matchers.places.prepare import (
     BLOCKING_RESOLUTION,
@@ -127,20 +127,22 @@ def matching(
     spark.sparkContext.addFile(model_jar)
     model = PlacesModel.load(spark, model_jar)
     jar_name = os.path.basename(model_jar)
-    to_block = prepared.candidates.filter(F.col("base_ids").isNull()).drop("base_ids")
-    blocked = io.checkpoint(
-        blocking_pairs(
-            to_block,
+    candidates_to_block = prepared.candidates.filter(F.col("base_ids").isNull()).drop(
+        "base_ids"
+    )
+    blocked_pairs = io.checkpoint(
+        get_blocking_pairs(
+            candidates_to_block,
             prepared.baseline,
             model,
-            name_idf_udf(jar_name),
-            predict_udf(jar_name, BLOCKING_BOOSTER_RESOURCE),
+            bind_name_idf_udf(jar_name),
+            bind_match_probability_udf(jar_name, BLOCKING_BOOSTER_RESOURCE),
         ),
         output_path,
         "blocking",
         FEATURE_TYPE,
     )
-    del blocked
+    del blocked_pairs
     raise NotImplementedError("matching: scoring and clustering are not ported yet")
 
 
