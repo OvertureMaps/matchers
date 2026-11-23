@@ -43,7 +43,11 @@ def params(spark, tmp_path):
 @pytest.fixture
 def fake_setup(spark, monkeypatch):
     def setup(
-        raw, provider, model_jar, baseline_provider=None, match_history=True
+        raw,
+        provider,
+        baseline_provider=None,
+        match_history=True,
+        blocking_resolution=16,
     ) -> SetupOutput:
         return SetupOutput(spark.range(1), spark.range(1))
 
@@ -79,9 +83,13 @@ def test_run_chains_stage_outputs_and_skips_on_rerun(spark, params, monkeypatch)
     calls = {}
 
     def setup(
-        raw, provider, model_jar, baseline_provider=None, match_history=True
+        raw,
+        provider,
+        baseline_provider=None,
+        match_history=True,
+        blocking_resolution=16,
     ) -> SetupOutput:
-        calls["setup"] = (raw.candidates.count(), match_history)
+        calls["setup"] = (raw.candidates.count(), match_history, blocking_resolution)
         return SetupOutput(spark.range(3), spark.range(4))
 
     def matching(prepared, output_path=None) -> MatchingOutput:
@@ -102,11 +110,13 @@ def test_run_chains_stage_outputs_and_skips_on_rerun(spark, params, monkeypatch)
 
     for fake in (setup, matching, assign_ids, metrics):
         monkeypatch.setattr(job, fake.__name__, fake)
-    config = job.RunConfig.from_params(params | {"matchHistory": "false"})
+    config = job.RunConfig.from_params(
+        params | {"matchHistory": "false", "blockingResolution": 14}
+    )
     job.run(spark, config)
     run = params["outputPath"]
     assert calls == {
-        "setup": (2, False),
+        "setup": (2, False, 14),
         "matching": (3, 4, run),
         "assign_ids": (5, run),
         "metrics": (6, 7),
@@ -122,3 +132,55 @@ def test_run_local_reads_params_file(spark, tmp_path, params, fake_setup):
     with pytest.raises(NotImplementedError, match="matching"):
         run_local(job.run, str(params_file), spark=spark)
     assert (tmp_path / "run" / "config.json").is_file()
+
+
+def test_run_local_passes_model_jar_to_new_session(
+    spark, tmp_path, params, monkeypatch
+):
+    seen = []
+
+    def fake_session(**kwargs):
+        seen.append(kwargs["extra_spark_conf"])
+        return spark
+
+    monkeypatch.setattr(
+        "overture_matchers.core.local.getSparkSedonaSession", fake_session
+    )
+    local_jar = tmp_path / "model.jar"
+    local_jar.write_bytes(b"")
+
+    with_remote_jar = tmp_path / "with_jar.json"
+    with_remote_jar.write_text(json.dumps(params | {"modelJar": "s3://b/model.jar"}))
+    run_local(lambda s, c: None, str(with_remote_jar))
+
+    with_file_uri = tmp_path / "with_file_uri.json"
+    with_file_uri.write_text(
+        json.dumps(
+            params
+            | {"modelJar": local_jar.as_uri(), "outputPath": str(tmp_path / "run_uri")}
+        )
+    )
+    run_local(lambda s, c: None, str(with_file_uri))
+
+    without_jar = tmp_path / "without_jar.json"
+    without_jar.write_text(
+        json.dumps(
+            {k: v for k, v in params.items() if k != "modelJar"}
+            | {"outputPath": str(tmp_path / "run2")}
+        )
+    )
+    run_local(lambda s, c: None, str(without_jar))
+
+    assert seen == [
+        {"spark.jars": "s3a://b/model.jar"},
+        {"spark.jars": local_jar.as_uri()},
+        {},
+    ]
+
+
+@pytest.mark.parametrize("bad_jar", ["/no/such.jar", "file:///no/such.jar"])
+def test_run_local_rejects_missing_local_model_jar(tmp_path, params, bad_jar):
+    params_file = tmp_path / "bad_jar.json"
+    params_file.write_text(json.dumps(params | {"modelJar": bad_jar}))
+    with pytest.raises(FileNotFoundError):
+        run_local(lambda s, c: None, str(params_file))

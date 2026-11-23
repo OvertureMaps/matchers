@@ -23,9 +23,11 @@ from sedona.spark.sql.st_functions import ParseAddress
 
 from overture_matchers.quadkey import get_focal_quadkey
 
-# Resolution of the signature's quadkey and the blocking keys.
+# Default resolution of the signature's quadkey and the blocking keys.
 BLOCKING_RESOLUTION = 16
 _PARSED_ADDRESS = "_parsed_address"
+_GEOMETRY = "_geometry"
+_QUADKEY = "_quadkey"
 _SIGNATURE_SEPARATOR = "@"
 _ACTIVE_STATE = "active"
 _NON_DIGITS = re.compile(r"[^0-9]")
@@ -41,8 +43,8 @@ class TextFunctions(NamedTuple):
 
     normalize_text: Callable[[Column], Column]
     tokenize_text: Callable[[Column], Column]
-    # Takes the name tokens and the H3 resolution 9 cell.
-    strip_background_tokens: Callable[[Column, Column], Column]
+    # Takes the name tokens, latitude and longitude.
+    strip_background_tokens: Callable[[Column, Column, Column], Column]
 
 
 def normalize_phone_number(
@@ -161,10 +163,30 @@ def _build_signature(*parts: Column) -> Column:
     return F.lower(F.concat_ws(_SIGNATURE_SEPARATOR, *parts))
 
 
+def _stage_reused_columns(
+    df: DataFrame,
+    parsed_address: Column,
+    blocking_resolution: int = BLOCKING_RESOLUTION,
+) -> DataFrame:
+    """Stage columns read by multiple outputs so Spark evaluates each one once."""
+    return (
+        df.withColumn(_PARSED_ADDRESS, parsed_address)
+        .withColumn(_GEOMETRY, F.expr("ST_GeomFromWKB(geometry)"))
+        .withColumn("latitude", F.expr(f"ST_Y({_GEOMETRY})"))
+        .withColumn("longitude", F.expr(f"ST_X({_GEOMETRY})"))
+        .withColumn(
+            _QUADKEY,
+            get_focal_quadkey(
+                F.col("latitude"), F.col("longitude"), blocking_resolution
+            ),
+        )
+    )
+
+
 def _prepare_columns_for_matching(
     df: DataFrame, provider: Column, text_functions: TextFunctions
 ) -> dict[str, Column]:
-    """Column expressions for matching on one side. ``df`` must carry ``_PARSED_ADDRESS``."""
+    """Column expressions for matching on one side, over ``_stage_reused_columns``."""
     country = _replace_invalid_utf8(F.col("addresses")[0]["country"])
     parsed_address = F.col(_PARSED_ADDRESS)
     house_number = _get_address_component(parsed_address, "house_number")
@@ -173,13 +195,12 @@ def _prepare_columns_for_matching(
     name_clean = text_functions.normalize_text(name)
     address_clean = text_functions.normalize_text(address)
     name_clean_tokens = text_functions.tokenize_text(name_clean)
-    latitude = F.expr("ST_Y(ST_GeomFromWKB(geometry))")
-    longitude = F.expr("ST_X(ST_GeomFromWKB(geometry))")
-    quadkey = get_focal_quadkey(latitude, longitude, BLOCKING_RESOLUTION)
+    latitude = F.col("latitude")
+    longitude = F.col("longitude")
+    quadkey = F.col(_QUADKEY)
     primary_source = _get_primary_source(F.col("sources"))
-    h3_res9_cell = F.expr("ST_H3CellIDs(ST_GeomFromWKB(geometry), 9, false)[0]")
     name_clean_stripped_tokens = text_functions.strip_background_tokens(
-        name_clean_tokens, h3_res9_cell
+        name_clean_tokens, latitude, longitude
     )
     website_domains, website_urls = _extract_website_domains_and_urls(df)
     return {
@@ -216,18 +237,21 @@ def _select_columns_for_matching(
     provider: Column,
     text_functions: TextFunctions,
     extra_columns: dict[str, Column],
+    blocking_resolution: int = BLOCKING_RESOLUTION,
 ) -> DataFrame:
     """Project ``df`` to the columns for matching plus ``extra_columns``."""
+    staged = _stage_reused_columns(df, _parse_first_address(), blocking_resolution)
     columns = (
-        _prepare_columns_for_matching(df, provider, text_functions) | extra_columns
+        _prepare_columns_for_matching(staged, provider, text_functions) | extra_columns
     )
-    # Parsing is expensive, so it is projected once and every field reads that column.
-    parsed = df.withColumn(_PARSED_ADDRESS, _parse_first_address())
-    return parsed.select(*[c.alias(n) for n, c in columns.items()])
+    return staged.select(*[c.alias(n) for n, c in columns.items()])
 
 
 def prepare_candidates(
-    df: DataFrame, provider: str, text_functions: TextFunctions
+    df: DataFrame,
+    provider: str,
+    text_functions: TextFunctions,
+    blocking_resolution: int = BLOCKING_RESOLUTION,
 ) -> DataFrame:
     """Candidates with the columns matching reads, before ``base_ids``.
 
@@ -235,10 +259,10 @@ def prepare_candidates(
         df: Raw candidate places.
         provider: Stamped on every row.
         text_functions: The text functions.
+        blocking_resolution: Quadkey zoom for ``blocking_keys`` and ``signature``.
     """
-    # One shuffle by id up front so later joins start co-partitioned.
     return _select_columns_for_matching(
-        df.repartition("id"), F.lit(provider), text_functions, {}
+        df, F.lit(provider), text_functions, {}, blocking_resolution
     )
 
 
@@ -261,7 +285,10 @@ def get_baseline_provider_column(
 
 
 def prepare_baseline(
-    df: DataFrame, provider: Column, text_functions: TextFunctions
+    df: DataFrame,
+    provider: Column,
+    text_functions: TextFunctions,
+    blocking_resolution: int = BLOCKING_RESOLUTION,
 ) -> DataFrame:
     """Baseline with the columns matching reads, plus ``active``.
 
@@ -269,6 +296,7 @@ def prepare_baseline(
         df: Raw baseline places.
         provider: The baseline's provider, from ``get_baseline_provider_column``.
         text_functions: The text functions.
+        blocking_resolution: Quadkey zoom for ``blocking_keys`` and ``signature``.
     """
     active = (
         F.when(F.col("corpus_state") == _ACTIVE_STATE, F.lit(1)).otherwise(F.lit(0))
@@ -276,7 +304,7 @@ def prepare_baseline(
         else F.lit(1)
     )
     return _select_columns_for_matching(
-        df.repartition("id"), provider, text_functions, {"active": active}
+        df, provider, text_functions, {"active": active}, blocking_resolution
     )
 
 

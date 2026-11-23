@@ -10,13 +10,8 @@ from pyspark.sql import functions as F
 
 from overture_matchers.core.stages import RawInputs
 from overture_matchers.places import prepare
-from overture_matchers.places.background_tokens import (
-    h3_cell_to_parent,
-    strip_background_tokens,
-)
 from overture_matchers.places.job import SetupOutput, setup
 from overture_matchers.places.prepare import (
-    _PARSED_ADDRESS,
     TextFunctions,
     _build_signature,
     _extract_website_domains_and_urls,
@@ -24,6 +19,7 @@ from overture_matchers.places.prepare import (
     _normalize_address,
     _prepare_columns_for_matching,
     _replace_invalid_utf8,
+    _stage_reused_columns,
     add_base_ids,
     get_baseline_provider_column,
     normalize_phone_number,
@@ -31,7 +27,6 @@ from overture_matchers.places.prepare import (
     prepare_candidates,
 )
 from overture_matchers.quadkey import get_focal_quadkey
-from overture_matchers.sketches import BloomFilter
 
 POINTS = [
     (0.0, 0.0),
@@ -64,31 +59,6 @@ def test_get_focal_quadkey_matches_the_tile_scheme(spark):
     assert [r.k for r in got] == expected
 
 
-def test_bloom_filter_agrees_with_spark(spark):
-    jvm = spark._jvm
-    jfilter = jvm.org.apache.spark.util.sketch.BloomFilter.create(1000, 0.01)
-    members = [f"9:{i}:coffee" for i in range(50)]
-    for m in members:
-        jfilter.putString(m)
-    out = jvm.java.io.ByteArrayOutputStream()
-    jfilter.writeTo(out)
-    ours = BloomFilter(bytes(out.toByteArray()))
-    others = [f"3:{i}:other" for i in range(200)]
-    for value in members + others:
-        assert ours.might_contain_string(value) == jfilter.mightContainString(value)
-
-
-def test_h3_cell_to_parent_matches_h3_core(spark):
-    h3 = spark._jvm.com.uber.h3core.H3Core.newInstance()
-    cell = (
-        spark.sql("select ST_H3CellIDs(ST_Point(-74.006, 40.7128), 9, false)[0] c")
-        .first()
-        .c
-    )
-    for res in (7, 5, 3):
-        assert h3_cell_to_parent(cell, res) == h3.cellToParent(cell, res)
-
-
 @pytest.mark.parametrize(
     ("number", "region", "digits"),
     [
@@ -108,7 +78,7 @@ def _address(freeform, locality=None):
 
 @pytest.mark.normalizer
 @pytest.mark.libpostal
-def test_setup_columns_and_history(spark, model_jar):
+def test_setup_columns_and_history(spark):
     schema = (
         "id string, names struct<primary:string>, "
         "addresses array<struct<freeform:string,locality:string,country:string>>, "
@@ -137,7 +107,7 @@ def test_setup_columns_and_history(spark, model_jar):
         .withColumn("provider", F.lit("acme"))
         .withColumn("corpus_state", F.lit("retired"))
     )
-    out = setup(RawInputs(df, baseline), "acme", model_jar)
+    out = setup(RawInputs(df, baseline), "acme")
     assert isinstance(out, SetupOutput)
     cand = {r.id: r for r in out.candidates.collect()}
     assert out.candidates.columns[0] == "id"
@@ -154,7 +124,7 @@ def test_setup_columns_and_history(spark, model_jar):
     assert c1.base_ids == ["b1"]
     assert cand["c2"].base_ids is None
     assert out.baseline.first().active == 0
-    no_history = setup(RawInputs(df, baseline), "acme", model_jar, match_history=False)
+    no_history = setup(RawInputs(df, baseline), "acme", match_history=False)
     assert no_history.candidates.where("base_ids is not null").count() == 0
 
 
@@ -179,7 +149,7 @@ def test_setup_validates_before_shipping(spark):
     plain = spark.createDataFrame([("b1",)], "id string")
     raw = RawInputs(plain, plain)
     with pytest.raises(ValueError, match="baselineProvider"):
-        setup(raw, "acme", "/no/such.jar")
+        setup(raw, "acme")
 
 
 def test_add_base_ids(spark):
@@ -292,23 +262,6 @@ def test_get_primary_source_returns_lowercased_prefix_of_first_unqualified_sourc
     ]
 
 
-def test_strip_background_tokens():
-    class Bloom:
-        def __init__(self, members):
-            self.members = members
-
-        def might_contain_string(self, key):
-            return key in self.members
-
-    cell = 0x8928308280FFFFF
-    prefix = f"9:{cell}:"
-    bloom = Bloom({prefix + "pizza"})
-    assert strip_background_tokens(["joes", "pizza"], cell, bloom) == ["joes"]
-    assert strip_background_tokens(["pizza"], cell, bloom) == ["pizza"]
-    assert strip_background_tokens(["joes", "pizza"], None, bloom) == ["joes", "pizza"]
-    assert strip_background_tokens(None, cell, bloom) == []
-
-
 def _raw_place(spark):
     schema = (
         "id string, names struct<primary:string>, "
@@ -317,39 +270,37 @@ def _raw_place(spark):
         "phones array<string>, websites array<string>, "
         "taxonomy struct<primary:string>"
     )
+    point_wkb = struct.pack("<BIdd", 1, 1, -74.006, 40.7128)
     rows = [
         (
             "c1",
             ("Joe's Pizza",),
             _address("781 Franklin Ave", "Brooklyn"),
-            None,
+            point_wkb,
             [(None, "Src@1")],
             ["(212) 555-0100"],
             ["https://www.Example.com:8080/a/?q=1", "nodot"],
             ("pizza_restaurant",),
         )
     ]
-    df = (
-        spark.createDataFrame(rows, schema)
-        .withColumn("geometry", F.expr("ST_AsBinary(ST_Point(-74.006, 40.7128))"))
-        .withColumn(
-            _PARSED_ADDRESS,
-            _components(("house_number", "781"), ("road", "franklin ave")),
-        )
-    )
-    return df
+    return spark.createDataFrame(rows, schema)
 
 
 _STAND_INS = TextFunctions(
     normalize_text=F.lower,
     tokenize_text=lambda c: F.split(c, " "),
-    strip_background_tokens=lambda tokens, cell: tokens,
+    strip_background_tokens=lambda tokens, lat, lng: F.when(
+        lat.isNotNull() & lng.isNotNull(), tokens
+    ).otherwise(tokens),
 )
 
 
 def test_prepare_columns_for_matching_without_the_model_jar(spark):
-    df = _raw_place(spark)
-    columns = _prepare_columns_for_matching(df, F.lit("acme"), _STAND_INS)
+    staged = _stage_reused_columns(
+        _raw_place(spark),
+        _components(("house_number", "781"), ("road", "franklin ave")),
+    )
+    columns = _prepare_columns_for_matching(staged, F.lit("acme"), _STAND_INS)
     assert list(columns) == [
         "id",
         "name",
@@ -373,7 +324,10 @@ def test_prepare_columns_for_matching_without_the_model_jar(spark):
         "website_domains",
         "website_urls",
     ]
-    row = df.select(*[c.alias(n) for n, c in columns.items()]).first()
+    projected = staged.select(*[c.alias(n) for n, c in columns.items()])
+    plan = projected._jdf.queryExecution().optimizedPlan().toString().lower()
+    assert plan.count("st_geomfromwkb") == 1
+    row = projected.first()
     quadkey = _reference_quadkey(40.7128, -74.006, 16)
     assert row.address == "franklin ave"
     assert row.house_number == "781"
@@ -390,14 +344,11 @@ def test_prepare_sides_add_their_extra_columns(spark, monkeypatch):
     # Parsing needs libpostal data, so the parsed column is supplied directly.
     components = _components(("house_number", "781"), ("road", "franklin ave"))
     monkeypatch.setattr(prepare, "_parse_first_address", lambda: components)
-    raw = _raw_place(spark).drop(_PARSED_ADDRESS)
-    candidates = prepare_candidates(raw, "acme", _STAND_INS)
-    assert candidates.first().provider == "acme"
+    raw = _raw_place(spark)
+    candidates = prepare_candidates(raw, "acme", _STAND_INS, blocking_resolution=12)
+    cand_row = candidates.first()
+    assert cand_row.provider == "acme"
+    assert cand_row.blocking_keys == [_reference_quadkey(40.7128, -74.006, 12)]
     retired = raw.withColumn("corpus_state", F.lit("retired"))
     assert prepare_baseline(retired, F.lit("b"), _STAND_INS).first().active == 0
     assert prepare_baseline(raw, F.lit("b"), _STAND_INS).first().active == 1
-
-
-def test_bloom_filter_rejects_unknown_version():
-    with pytest.raises(ValueError, match="version 2"):
-        BloomFilter(struct.pack(">iii", 2, 1, 1) + bytes(8))

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 by the Overture Maps Foundation
-"""Spark session setup for the places stages: shipping the model jar and libpostal data to workers, and binding the jar's text functions.
+"""Spark session setup for the places stages: shipping libpostal data to workers and registering the model jar's JVM text UDFs.
 
 The column logic in ``prepare`` takes its text functions as arguments, so it
 runs without the jar. Everything that needs the jar or the libpostal data lives here.
@@ -8,25 +8,28 @@ runs without the jar. Everything that needs the jar or the libpostal data lives 
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 from pyspark.sql import functions as F
 from pyspark.sql.types import ArrayType, StringType
 
-from overture_matchers.places.background_tokens import strip_background_tokens_udf
+from overture_matchers.core.config import rewrite_s3_to_s3a
 from overture_matchers.places.prepare import TextFunctions
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
 
 LIBPOSTAL_DATA_DIR_CONF = "spark.sedona.libpostal.dataDir"
+_BLOOM_FEATURES_CLASS = "org.overturemaps.places.features.BloomFeatures"
+_COREWORD_FILTER_RESOURCE = "/config/places/coreword_bg_filter.bin"
 _NORMALIZE_TEXT_UDF = "normalize_text"
 _TOKENIZE_TEXT_UDF = "tokenize_text"
+_STRIP_BACKGROUND_TOKENS_UDF = "strip_background_tokens"
 
 
 def register_text_udfs(spark: SparkSession) -> None:
-    """Register ``PlaceTextNormalizer`` as the JVM UDFs ``normalize_text`` and ``tokenize_text``."""
+    """Register the model jar's text normalizer, tokenizer and background-token UDFs."""
     udfs = "org.overturemaps.places.text"
     spark.udf.registerJavaFunction(
         _NORMALIZE_TEXT_UDF, f"{udfs}.NormalizeTextUdf", StringType()
@@ -34,47 +37,51 @@ def register_text_udfs(spark: SparkSession) -> None:
     spark.udf.registerJavaFunction(
         _TOKENIZE_TEXT_UDF, f"{udfs}.TokenizeTextUdf", ArrayType(StringType(), False)
     )
+    jvm = spark.sparkContext._jvm
+    bloom_class = jvm.org.apache.spark.util.Utils.classForName(
+        _BLOOM_FEATURES_CLASS, True, False
+    )
+    stream = bloom_class.getResourceAsStream(_COREWORD_FILTER_RESOURCE)
+    if stream is None:
+        raise FileNotFoundError(
+            f"{_COREWORD_FILTER_RESOURCE} not found on the Spark classpath"
+        )
+    try:
+        filter_bytes = stream.readAllBytes()
+    finally:
+        stream.close()
+    jvm.org.overturemaps.places.features.BloomFeatures.registerCoreword(
+        spark._jsparkSession, _STRIP_BACKGROUND_TOKENS_UDF, filter_bytes
+    )
 
 
-def ship_model_and_libpostal_data_to_workers(
-    spark: SparkSession, model_jar: str
-) -> None:
-    """Send the model jar and the libpostal data to the workers.
+def ship_libpostal_data_to_workers(spark: SparkSession) -> None:
+    """Send remote libpostal data to the workers.
 
     Args:
         spark: The session. ``spark.sedona.libpostal.dataDir`` must name the
             unpacked v1.0.0 libpostal data.
-        model_jar: Path of the ``places-matcher-model`` jar.
 
     Raises:
         ValueError: The libpostal data dir is not set. Sedona's default
             model would change addresses outside the US.
-        FileNotFoundError: A local ``model_jar`` does not exist.
     """
-    if "://" not in model_jar and not os.path.isfile(model_jar):
-        raise FileNotFoundError(model_jar)
     data_dir = spark.conf.get(LIBPOSTAL_DATA_DIR_CONF, None)
     if not data_dir:
         raise ValueError(f"set {LIBPOSTAL_DATA_DIR_CONF} to the libpostal v1.0.0 data")
-    spark.sparkContext.addFile(model_jar)
     # Local data dirs work as-is; only remote data needs shipping.
-    if "://" in data_dir and not data_dir.startswith("file:"):
-        spark.sparkContext.addFile(data_dir, recursive=True)
+    if urlparse(data_dir).scheme not in ("", "file"):
+        normalized = rewrite_s3_to_s3a(data_dir)
+        spark.conf.set(LIBPOSTAL_DATA_DIR_CONF, normalized)
+        spark.sparkContext.addFile(normalized, recursive=True)
 
 
-def bind_jvm_text_functions(model_jar: str) -> TextFunctions:
-    """Text functions backed by the model jar.
-
-    Args:
-        model_jar: Path of the ``places-matcher-model`` jar. Its file name is
-            where workers find it after ``ship_model_and_libpostal_data_to_workers``.
-            ``register_text_udfs`` must have run before the columns are built.
-    """
-    jar_name = os.path.basename(model_jar)
+def bind_jvm_text_functions() -> TextFunctions:
+    """Text functions backed by the JVM UDFs registered by ``register_text_udfs``."""
     return TextFunctions(
         normalize_text=lambda text: F.call_udf(_NORMALIZE_TEXT_UDF, text),
         tokenize_text=lambda text: F.call_udf(_TOKENIZE_TEXT_UDF, text),
-        strip_background_tokens=lambda tokens, cell: strip_background_tokens_udf(
-            jar_name, tokens, cell
+        strip_background_tokens=lambda tokens, latitude, longitude: F.call_udf(
+            _STRIP_BACKGROUND_TOKENS_UDF, tokens, latitude, longitude
         ),
     )

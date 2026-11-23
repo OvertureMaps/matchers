@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from dataclasses import asdict, dataclass
 from importlib.metadata import version
@@ -30,6 +31,7 @@ _PARAM_FIELDS = {
     "embeddingsCacheTable": "embeddings_cache_table",
     "previousMetricsPath": "previous_metrics_path",
     "modelJar": "model_jar",
+    "blockingResolution": "blocking_resolution",
 }
 _REQUIRED = ("output_path", "input", "baseline", "provider")
 _BOOLS = ("match_history",)
@@ -45,8 +47,19 @@ def _parse_bool(value: Any) -> bool:
     raise ValueError(f"expected true or false, got {value!r}")
 
 
-def _s3a(path: str) -> str:
-    # Hadoop's S3 connector works on any Spark platform with hadoop-aws.
+def _parse_blocking_resolution(value: Any) -> int:
+    if not isinstance(value, bool) and isinstance(value, (int, str)):
+        with contextlib.suppress(ValueError):
+            resolution = int(value)
+            if 1 <= resolution <= 23:
+                return resolution
+    raise ValueError(
+        f"blockingResolution must be an integer from 1 to 23, got {value!r}"
+    )
+
+
+def rewrite_s3_to_s3a(path: str) -> str:
+    """Rewrite an ``s3://`` URI to ``s3a://`` so Hadoop's S3A connector handles it."""
     return "s3a://" + path[len("s3://") :] if path.startswith("s3://") else path
 
 
@@ -67,10 +80,12 @@ def _parse_path_map(param: str, value: Any) -> dict[str, list[str]]:
         paths = [paths] if isinstance(paths, str) else paths
         if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
             raise error
-        path_map[feature_type] = [_s3a(p) for p in paths]
+        path_map[feature_type] = [rewrite_s3_to_s3a(p) for p in paths]
     return path_map
 
 
+# TODO: Split theme-specific fields out of this shared RunConfig once the other
+# themes land, so unrelated runs do not carry null fields in config.json.
 @dataclass(frozen=True)
 class RunConfig:
     """Settings for one matching run.
@@ -80,6 +95,8 @@ class RunConfig:
             ``provider`` column, such as a Places release. Places only.
         match_history: Whether candidates with history matches skip scoring.
         model_jar: The ``places-matcher-model`` jar. Only places reads it.
+        blocking_resolution: Quadkey zoom (1 to 23) for ``blocking_keys`` and
+            ``signature`` in places setup. Places defaults to 16 when unset.
     """
 
     output_path: str
@@ -92,6 +109,7 @@ class RunConfig:
     embeddings_cache_table: str | None = None
     previous_metrics_path: str | None = None
     model_jar: str | None = None
+    blocking_resolution: int | None = None
 
     @classmethod
     def from_params(cls, params: dict[str, Any]) -> RunConfig:
@@ -107,12 +125,17 @@ class RunConfig:
         missing = [f for f in _REQUIRED if f not in values]
         if missing:
             raise ValueError(f"missing required params: {missing}")
-        values["output_path"] = _s3a(values["output_path"].rstrip("/"))
-        if "previous_metrics_path" in values:
-            values["previous_metrics_path"] = _s3a(values["previous_metrics_path"])
+        values["output_path"] = rewrite_s3_to_s3a(values["output_path"].rstrip("/"))
+        for field in ("previous_metrics_path", "model_jar"):
+            if field in values:
+                values[field] = rewrite_s3_to_s3a(values[field])
         for field in _BOOLS:
             if field in values:
                 values[field] = _parse_bool(values[field])
+        if "blocking_resolution" in values:
+            values["blocking_resolution"] = _parse_blocking_resolution(
+                values["blocking_resolution"]
+            )
         for field in _PATH_MAPS:
             values[field] = _parse_path_map(field, values[field])
         return cls(**values)

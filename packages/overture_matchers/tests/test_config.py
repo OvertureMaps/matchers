@@ -25,7 +25,16 @@ def test_from_params_fills_defaults_and_parses_types():
     assert config.match_history is True
     assert config.embeddings_cache_table is None
     assert config.model_jar is None
+    assert config.blocking_resolution is None
     assert RunConfig.from_params(PARAMS | {"modelJar": "/m.jar"}).model_jar == "/m.jar"
+    assert (
+        RunConfig.from_params(PARAMS | {"blockingResolution": "14"}).blocking_resolution
+        == 14
+    )
+    assert (
+        RunConfig.from_params(PARAMS | {"blockingResolution": 12}).blocking_resolution
+        == 12
+    )
     assert RunConfig.from_params(PARAMS | {"outputPath": "/r/"}).output_path == "/r"
     s3 = RunConfig.from_params(
         PARAMS
@@ -33,12 +42,14 @@ def test_from_params_fills_defaults_and_parses_types():
             "outputPath": "s3://b/run/",
             "input": {"place": "s3://b/in"},
             "previousMetricsPath": "s3://b/m",
+            "modelJar": "s3://b/model.jar",
         }
     )
-    assert (s3.output_path, s3.input, s3.previous_metrics_path) == (
+    assert (s3.output_path, s3.input, s3.previous_metrics_path, s3.model_jar) == (
         "s3a://b/run",
         {"place": ["s3a://b/in"]},
         "s3a://b/m",
+        "s3a://b/model.jar",
     )
 
 
@@ -61,6 +72,9 @@ def test_from_params_rejects_missing_required_bad_bool_and_bad_map():
         RunConfig.from_params({k: v for k, v in PARAMS.items() if k != "provider"})
     with pytest.raises(ValueError, match="true or false"):
         RunConfig.from_params(PARAMS | {"matchHistory": "maybe"})
+    for bad_resolution in (True, "abc", 0, 24):
+        with pytest.raises(ValueError, match="blockingResolution"):
+            RunConfig.from_params(PARAMS | {"blockingResolution": bad_resolution})
     with pytest.raises(TypeError, match="input must be a"):
         RunConfig.from_params(PARAMS | {"input": '["s3://bucket/a/"]'})
     with pytest.raises(TypeError, match="input must be a"):
