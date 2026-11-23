@@ -9,7 +9,7 @@ from pyspark.sql import functions as F
 
 from overture_matchers.places.runtime import (
     LIBPOSTAL_DATA_DIR_CONF,
-    jvm_text_fns,
+    bind_jvm_text_functions,
     register_text_udfs,
     ship_model_and_libpostal_data_to_workers,
 )
@@ -61,7 +61,7 @@ def test_register_text_udfs_names_both_functions():
     assert names == ["normalize_text", "tokenize_text"]
 
 
-def test_jvm_text_fns_build_columns_from_the_jar_basename(spark):
-    text = jvm_text_fns("/some/dir/model.jar")
-    assert text.normalize(F.lit("a")) is not None
-    assert text.tokenize(F.lit("a")) is not None
+def test_bind_jvm_text_functions_builds_columns_from_the_jar_basename(spark):
+    text_functions = bind_jvm_text_functions("/some/dir/model.jar")
+    assert text_functions.normalize_text(F.lit("a")) is not None
+    assert text_functions.tokenize_text(F.lit("a")) is not None

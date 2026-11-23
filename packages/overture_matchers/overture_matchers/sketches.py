@@ -16,19 +16,19 @@ import struct
 _MASK = 0xFFFFFFFF
 
 
-def _rotl(x: int, r: int) -> int:
-    return ((x << r) | (x >> (32 - r))) & _MASK
+def _rotate_left_32(x: int, bits: int) -> int:
+    return ((x << bits) | (x >> (32 - bits))) & _MASK
 
 
 def _mix_k1(k1: int) -> int:
-    return (_rotl((k1 * 0xCC9E2D51) & _MASK, 15) * 0x1B873593) & _MASK
+    return (_rotate_left_32((k1 * 0xCC9E2D51) & _MASK, 15) * 0x1B873593) & _MASK
 
 
 def _mix_h1(h1: int, k1: int) -> int:
-    return (_rotl(h1 ^ k1, 13) * 5 + 0xE6546B64) & _MASK
+    return (_rotate_left_32(h1 ^ k1, 13) * 5 + 0xE6546B64) & _MASK
 
 
-def _signed(x: int) -> int:
+def _to_signed_int32(x: int) -> int:
     return x - (1 << 32) if x & 0x80000000 else x
 
 
@@ -51,7 +51,7 @@ def murmur3_32(data: bytes, seed: int) -> int:
     h1 ^= h1 >> 13
     h1 = (h1 * 0xC2B2AE35) & _MASK
     h1 ^= h1 >> 16
-    return _signed(h1)
+    return _to_signed_int32(h1)
 
 
 _HEADER = 12
@@ -82,7 +82,7 @@ class BloomFilter:
         h1 = murmur3_32(raw, 0)
         h2 = murmur3_32(raw, h1)
         for i in range(1, self._num_hashes + 1):
-            combined = _signed((h1 + i * h2) & _MASK)
+            combined = _to_signed_int32((h1 + i * h2) & _MASK)
             if combined < 0:
                 combined = ~combined
             index = combined % self._bit_size

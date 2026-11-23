@@ -11,26 +11,26 @@ from pyspark.sql import functions as F
 from overture_matchers.core.stages import RawInputs
 from overture_matchers.places import prepare
 from overture_matchers.places.background_tokens import (
-    h3_parent,
+    h3_cell_to_parent,
     strip_background_tokens,
 )
 from overture_matchers.places.job import SetupOutput, setup
 from overture_matchers.places.prepare import (
-    _COMPONENTS,
-    TextFns,
-    _address_columns,
-    _clean_utf8,
-    _matching_columns,
-    _signature,
-    _source,
-    _website_columns,
+    _PARSED_ADDRESS,
+    TextFunctions,
+    _build_signature,
+    _extract_website_domains_and_urls,
+    _get_primary_source,
+    _normalize_address,
+    _prepare_columns_for_matching,
+    _replace_invalid_utf8,
     add_base_ids,
-    baseline_provider_column,
-    normalize_phone,
+    get_baseline_provider_column,
+    normalize_phone_number,
     prepare_baseline,
     prepare_candidates,
 )
-from overture_matchers.quadkey import focal_quadkey
+from overture_matchers.quadkey import get_focal_quadkey
 from overture_matchers.sketches import BloomFilter
 
 POINTS = [
@@ -55,9 +55,11 @@ def _reference_quadkey(lat, lng, zoom):
     )
 
 
-def test_focal_quadkey_matches_the_tile_scheme(spark):
+def test_get_focal_quadkey_matches_the_tile_scheme(spark):
     df = spark.createDataFrame(POINTS + [(None, 1.0)], "lat double, lng double")
-    got = df.select(focal_quadkey(F.col("lat"), F.col("lng"), 16).alias("k")).collect()
+    got = df.select(
+        get_focal_quadkey(F.col("lat"), F.col("lng"), 16).alias("k")
+    ).collect()
     expected = [_reference_quadkey(lat, lng, 16) for lat, lng in POINTS] + [None]
     assert [r.k for r in got] == expected
 
@@ -76,7 +78,7 @@ def test_bloom_filter_agrees_with_spark(spark):
         assert ours.might_contain_string(value) == jfilter.mightContainString(value)
 
 
-def test_h3_parent_matches_h3_core(spark):
+def test_h3_cell_to_parent_matches_h3_core(spark):
     h3 = spark._jvm.com.uber.h3core.H3Core.newInstance()
     cell = (
         spark.sql("select ST_H3CellIDs(ST_Point(-74.006, 40.7128), 9, false)[0] c")
@@ -84,7 +86,7 @@ def test_h3_parent_matches_h3_core(spark):
         .c
     )
     for res in (7, 5, 3):
-        assert h3_parent(cell, res) == h3.cellToParent(cell, res)
+        assert h3_cell_to_parent(cell, res) == h3.cellToParent(cell, res)
 
 
 @pytest.mark.parametrize(
@@ -96,8 +98,8 @@ def test_h3_parent_matches_h3_core(spark):
         (None, "US", None),
     ],
 )
-def test_normalize_phone(number, region, digits):
-    assert normalize_phone(number, region) == digits
+def test_normalize_phone_number(number, region, digits):
+    assert normalize_phone_number(number, region) == digits
 
 
 def _address(freeform, locality=None):
@@ -161,10 +163,14 @@ def test_baseline_provider_rules(spark):
     with_provider = plain.withColumn("provider", F.lit("acme"))
     for df, given in ((plain, None), (with_provider, "other")):
         with pytest.raises(ValueError, match="baselineProvider"):
-            baseline_provider_column(df, given)
-    assert plain.select(baseline_provider_column(plain, "acme")).first()[0] == "acme"
+            get_baseline_provider_column(df, given)
     assert (
-        with_provider.select(baseline_provider_column(with_provider, None)).first()[0]
+        plain.select(get_baseline_provider_column(plain, "acme")).first()[0] == "acme"
+    )
+    assert (
+        with_provider.select(get_baseline_provider_column(with_provider, None)).first()[
+            0
+        ]
         == "acme"
     )
 
@@ -191,24 +197,24 @@ def test_add_base_ids(spark):
     assert off.where("base_ids is not null").count() == 0
 
 
-def test_clean_utf8_replaces_invalid_bytes(spark):
+def test_replace_invalid_utf8_replaces_invalid_bytes(spark):
     raw = F.unhex(F.lit("41FF42")).cast("string")
     row = (
         spark.range(1)
         .select(
             F.hex(raw.cast("binary")).alias("raw"),
-            F.hex(F.encode(_clean_utf8(raw), "UTF-8")).alias("clean"),
+            F.hex(F.encode(_replace_invalid_utf8(raw), "UTF-8")).alias("clean"),
         )
         .first()
     )
     assert (row.raw, row.clean) == ("41FF42", "41EFBFBD42")
 
 
-def test_signature_joins_lowercased_non_null_parts(spark):
+def test_build_signature_joins_lowercased_non_null_parts(spark):
     row = (
         spark.range(1)
         .select(
-            _signature(
+            _build_signature(
                 F.lit("Src"),
                 F.lit("0123"),
                 F.lit(None),
@@ -228,7 +234,7 @@ def _components(*pairs):
     return F.array(*parts).cast("array<struct<label:string,value:string>>")
 
 
-def test_address_fallbacks(spark):
+def test_normalize_address_fallbacks(spark):
     cases = [
         ("1 Main St", [("house_number", "1"), ("road", "main st")], "main st"),
         ("1 Main St", [("house_number", "1"), ("city", "x")], ""),
@@ -242,9 +248,7 @@ def test_address_fallbacks(spark):
             _components(*c).alias("c"),
         )
         .select(
-            _address_columns(F.col("addresses")[0]["freeform"], F.col("c"))[1].alias(
-                "a"
-            )
+            _normalize_address(F.col("c"), F.col("addresses")[0]["freeform"]).alias("a")
         )
         .first()
         .a
@@ -253,16 +257,23 @@ def test_address_fallbacks(spark):
     assert rows == [e for *_, e in cases]
 
 
-def test_website_columns(spark):
+def test_extract_website_domains_and_urls(spark):
     df = spark.createDataFrame(
-        [(["https://www.Example.com:8080/a/?q=1", "nodot"],)], "websites array<string>"
+        [(["https://www.Example.com:8080/a/?q=1", "nodot", ""],)],
+        "websites array<string>",
     )
-    hosts, urls = _website_columns(df)
-    row = df.select(hosts.alias("h"), urls.alias("u")).first()
-    assert (row.h, row.u) == (["example.com", "nodot"], ["example.com:8080/a", "nodot"])
+    domains, urls = _extract_website_domains_and_urls(df)
+    row = df.select(domains.alias("d"), urls.alias("u")).first()
+    assert (row.d, row.u) == (["example.com", "nodot"], ["example.com:8080/a"])
+    no_col = spark.range(1)
+    empty_domains, empty_urls = _extract_website_domains_and_urls(no_col)
+    empty_row = no_col.select(empty_domains.alias("d"), empty_urls.alias("u")).first()
+    assert (empty_row.d, empty_row.u) == ([], [])
 
 
-def test_source_is_the_lowercased_prefix_of_the_first_unqualified_source(spark):
+def test_get_primary_source_returns_lowercased_prefix_of_first_unqualified_source(
+    spark,
+):
     df = spark.createDataFrame(
         [
             ([(None, "Src@1"), ("x", "other@2")],),
@@ -271,7 +282,10 @@ def test_source_is_the_lowercased_prefix_of_the_first_unqualified_source(spark):
         ],
         "sources array<struct<property:string,record_id:string>>",
     )
-    assert [r.s for r in df.select(_source(F.col("sources")).alias("s")).collect()] == [
+    assert [
+        r.s
+        for r in df.select(_get_primary_source(F.col("sources")).alias("s")).collect()
+    ] == [
         "src",
         "second",
         "",
@@ -319,23 +333,23 @@ def _raw_place(spark):
         spark.createDataFrame(rows, schema)
         .withColumn("geometry", F.expr("ST_AsBinary(ST_Point(-74.006, 40.7128))"))
         .withColumn(
-            _COMPONENTS,
+            _PARSED_ADDRESS,
             _components(("house_number", "781"), ("road", "franklin ave")),
         )
     )
     return df
 
 
-_STAND_INS = TextFns(
-    normalize=F.lower,
-    tokenize=lambda c: F.split(c, " "),
-    strip_background=lambda tokens, cell: tokens,
+_STAND_INS = TextFunctions(
+    normalize_text=F.lower,
+    tokenize_text=lambda c: F.split(c, " "),
+    strip_background_tokens=lambda tokens, cell: tokens,
 )
 
 
-def test_matching_columns_without_the_model_jar(spark):
+def test_prepare_columns_for_matching_without_the_model_jar(spark):
     df = _raw_place(spark)
-    columns = _matching_columns(df, F.lit("acme"), _STAND_INS)
+    columns = _prepare_columns_for_matching(df, F.lit("acme"), _STAND_INS)
     assert list(columns) == [
         "id",
         "name",
@@ -375,8 +389,8 @@ def test_matching_columns_without_the_model_jar(spark):
 def test_prepare_sides_add_their_extra_columns(spark, monkeypatch):
     # Parsing needs libpostal data, so the parsed column is supplied directly.
     components = _components(("house_number", "781"), ("road", "franklin ave"))
-    monkeypatch.setattr(prepare, "_parsed_components", lambda: components)
-    raw = _raw_place(spark).drop(_COMPONENTS)
+    monkeypatch.setattr(prepare, "_parse_first_address", lambda: components)
+    raw = _raw_place(spark).drop(_PARSED_ADDRESS)
     candidates = prepare_candidates(raw, "acme", _STAND_INS)
     assert candidates.first().provider == "acme"
     retired = raw.withColumn("corpus_state", F.lit("retired"))

@@ -11,12 +11,12 @@ _MAX_LATITUDE = 85.05112878
 _TILE_SIZE = 256
 
 
-def focal_quadkey(lat: Column, lng: Column, resolution: int) -> Column:
+def get_focal_quadkey(latitude: Column, longitude: Column, resolution: int) -> Column:
     """Quadkey of the tile at ``resolution`` containing the given point.
 
     Args:
-        lat: Latitude in degrees.
-        lng: Longitude in degrees.
+        latitude: Latitude in degrees.
+        longitude: Longitude in degrees.
         resolution: Tile zoom, from 1 to 23.
 
     Returns:
@@ -24,21 +24,23 @@ def focal_quadkey(lat: Column, lng: Column, resolution: int) -> Column:
         coordinate is null.
     """
     grid_size = _TILE_SIZE << resolution
-    clamped_lat = F.least(F.greatest(lat, F.lit(-_MAX_LATITUDE)), F.lit(_MAX_LATITUDE))
+    clamped_lat = F.least(
+        F.greatest(latitude, F.lit(-_MAX_LATITUDE)), F.lit(_MAX_LATITUDE)
+    )
     sin_lat = F.sin(F.radians(clamped_lat))
-    x_grid = (F.least(F.greatest(lng, F.lit(-180.0)), F.lit(180.0)) + 180) / 360
+    x_grid = (F.least(F.greatest(longitude, F.lit(-180.0)), F.lit(180.0)) + 180) / 360
     y_grid = 0.5 - F.log((1 + sin_lat) / (1 - sin_lat)) / (4 * F.lit(3.141592653589793))
 
-    def cell(grid: Column) -> Column:
+    def grid_to_cell(grid: Column) -> Column:
         pixel = F.least(
             F.greatest(grid * grid_size + 0.5, F.lit(0.0)), F.lit(grid_size - 1.0)
         )
         # The pixel is non-negative, so the casts truncate like integer division.
         return (pixel.cast("int") / _TILE_SIZE).cast("int")
 
-    x_cell, y_cell = cell(x_grid), cell(y_grid)
+    x_cell, y_cell = grid_to_cell(x_grid), grid_to_cell(y_grid)
     return F.when(
-        lat.isNotNull() & lng.isNotNull(),
+        latitude.isNotNull() & longitude.isNotNull(),
         F.concat(
             *[
                 (

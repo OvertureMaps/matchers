@@ -33,7 +33,7 @@ _H3_MAX_RES = 15
 _UINT64 = (1 << 64) - 1
 
 
-def h3_parent(cell: int, resolution: int) -> int:
+def h3_cell_to_parent(cell: int, resolution: int) -> int:
     """H3 parent of ``cell`` at a coarser ``resolution``.
 
     Bit arithmetic keeps workers free of an H3 library.
@@ -44,7 +44,7 @@ def h3_parent(cell: int, resolution: int) -> int:
 
 
 @cache
-def _load_filter(jar_name: str) -> BloomFilter:
+def _load_background_filter(jar_name: str) -> BloomFilter:
     with zipfile.ZipFile(SparkFiles.get(jar_name)) as jar:
         return BloomFilter(jar.read(FILTER_RESOURCE))
 
@@ -66,7 +66,7 @@ def strip_background_tokens(
     if not tokens:
         return []
     keys = (
-        [f"{res}:{h3_parent(h3_res9, res) & _UINT64}:" for res in RESOLUTIONS]
+        [f"{res}:{h3_cell_to_parent(h3_res9, res) & _UINT64}:" for res in RESOLUTIONS]
         if h3_res9 is not None
         else []
     )
@@ -90,6 +90,6 @@ def strip_background_tokens_udf(
     """
 
     def strip(tokens, cell):
-        return strip_background_tokens(tokens, cell, _load_filter(jar_name))
+        return strip_background_tokens(tokens, cell, _load_background_filter(jar_name))
 
     return F.udf(strip, ArrayType(StringType()))(tokens, h3_res9)

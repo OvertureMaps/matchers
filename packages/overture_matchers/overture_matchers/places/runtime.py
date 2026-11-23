@@ -15,24 +15,24 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import ArrayType, StringType
 
 from overture_matchers.places.background_tokens import strip_background_tokens_udf
-from overture_matchers.places.prepare import TextFns
+from overture_matchers.places.prepare import TextFunctions
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
 
 LIBPOSTAL_DATA_DIR_CONF = "spark.sedona.libpostal.dataDir"
-_NORMALIZE_UDF = "normalize_text"
-_TOKENIZE_UDF = "tokenize_text"
+_NORMALIZE_TEXT_UDF = "normalize_text"
+_TOKENIZE_TEXT_UDF = "tokenize_text"
 
 
 def register_text_udfs(spark: SparkSession) -> None:
     """Register ``PlaceTextNormalizer`` as the JVM UDFs ``normalize_text`` and ``tokenize_text``."""
     udfs = "org.overturemaps.places.text"
     spark.udf.registerJavaFunction(
-        _NORMALIZE_UDF, f"{udfs}.NormalizeTextUdf", StringType()
+        _NORMALIZE_TEXT_UDF, f"{udfs}.NormalizeTextUdf", StringType()
     )
     spark.udf.registerJavaFunction(
-        _TOKENIZE_UDF, f"{udfs}.TokenizeTextUdf", ArrayType(StringType(), False)
+        _TOKENIZE_TEXT_UDF, f"{udfs}.TokenizeTextUdf", ArrayType(StringType(), False)
     )
 
 
@@ -62,7 +62,7 @@ def ship_model_and_libpostal_data_to_workers(
         spark.sparkContext.addFile(data_dir, recursive=True)
 
 
-def jvm_text_fns(model_jar: str) -> TextFns:
+def bind_jvm_text_functions(model_jar: str) -> TextFunctions:
     """Text functions backed by the model jar.
 
     Args:
@@ -71,10 +71,10 @@ def jvm_text_fns(model_jar: str) -> TextFns:
             ``register_text_udfs`` must have run before the columns are built.
     """
     jar_name = os.path.basename(model_jar)
-    return TextFns(
-        normalize=lambda text: F.call_udf(_NORMALIZE_UDF, text),
-        tokenize=lambda text: F.call_udf(_TOKENIZE_UDF, text),
-        strip_background=lambda tokens, cell: strip_background_tokens_udf(
+    return TextFunctions(
+        normalize_text=lambda text: F.call_udf(_NORMALIZE_TEXT_UDF, text),
+        tokenize_text=lambda text: F.call_udf(_TOKENIZE_TEXT_UDF, text),
+        strip_background_tokens=lambda tokens, cell: strip_background_tokens_udf(
             jar_name, tokens, cell
         ),
     )

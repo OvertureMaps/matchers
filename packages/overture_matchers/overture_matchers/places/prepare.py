@@ -3,9 +3,9 @@
 """Places setup steps: the columns matching reads, and the history join.
 
 Each side's columns come from one ``select``. Name normalization, tokenizing
-and background-token stripping come in as ``TextFns``, so the matching rules
-here run without the ``places-matcher-model`` jar. Python UDFs live here, not
-in the job script, so that workers can unpickle them.
+and background-token stripping come in as ``TextFunctions``, so the matching
+rules here run without the ``places-matcher-model`` jar. Python UDFs live here,
+not in the job script, so that workers can unpickle them.
 """
 
 from __future__ import annotations
@@ -21,11 +21,11 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import StringType
 from sedona.spark.sql.st_functions import ParseAddress
 
-from overture_matchers.quadkey import focal_quadkey
+from overture_matchers.quadkey import get_focal_quadkey
 
 # Resolution of the signature's quadkey and the blocking keys.
 BLOCKING_RESOLUTION = 16
-_COMPONENTS = "_components"
+_PARSED_ADDRESS = "_parsed_address"
 _SIGNATURE_SEPARATOR = "@"
 _ACTIVE_STATE = "active"
 _NON_DIGITS = re.compile(r"[^0-9]")
@@ -36,38 +36,40 @@ _HOST_AND_PATH = r"^(?:[a-z][a-z0-9+.-]*://)?(?:www\.)?([^?#]+)"
 _JAVA_TRIM = r"^[\x00-\x20]+|[\x00-\x20]+$"
 
 
-class TextFns(NamedTuple):
-    """The text functions the matching columns use, each over Columns."""
+class TextFunctions(NamedTuple):
+    """The text functions that build the columns for matching, each over Columns."""
 
-    normalize: Callable[[Column], Column]
-    tokenize: Callable[[Column], Column]
+    normalize_text: Callable[[Column], Column]
+    tokenize_text: Callable[[Column], Column]
     # Takes the name tokens and the H3 resolution 9 cell.
-    strip_background: Callable[[Column, Column], Column]
+    strip_background_tokens: Callable[[Column, Column], Column]
 
 
-def normalize_phone(number: str | None, region: str | None) -> str | None:
-    """Digits of the international format of ``number``.
+def normalize_phone_number(
+    phone_number: str | None, country_code: str | None
+) -> str | None:
+    """Digits of the international format of ``phone_number``.
 
     Args:
-        number: A phone number, usually with punctuation.
-        region: ISO country code to read a national number in.
+        phone_number: A phone number, usually with punctuation.
+        country_code: ISO country code to read a national number in.
 
     Returns:
         Digits only. An unparseable number keeps its own digits. None for None.
     """
-    if number is None:
+    if phone_number is None:
         return None
     with contextlib.suppress(
         phonenumbers.NumberParseException
     ):  # Unparseable numbers keep their raw digits.
-        number = phonenumbers.format_number(
-            phonenumbers.parse(number, region),
+        phone_number = phonenumbers.format_number(
+            phonenumbers.parse(phone_number, country_code),
             phonenumbers.PhoneNumberFormat.INTERNATIONAL,
         )
-    return _NON_DIGITS.sub("", number)
+    return _NON_DIGITS.sub("", phone_number)
 
 
-def _clean_utf8(col: Column) -> Column:
+def _replace_invalid_utf8(col: Column) -> Column:
     """Replace invalid UTF-8 in the JVM, so Python UDFs never receive it."""
     return F.decode(F.encode(col, "UTF-8"), "UTF-8")
 
@@ -76,7 +78,7 @@ def _java_trim(col: Column) -> Column:
     return F.regexp_replace(col, _JAVA_TRIM, "")
 
 
-def _source(sources: Column) -> Column:
+def _get_primary_source(sources: Column) -> Column:
     """Lowercased record ID prefix of the first source without a property."""
     primary = F.filter(
         sources, lambda s: s["property"].isNull() | (s["property"] == "")
@@ -86,28 +88,32 @@ def _source(sources: Column) -> Column:
     )
 
 
-def _component(components: Column, label: str) -> Column:
+def _get_address_component(components: Column, label: str) -> Column:
     first = F.filter(components, lambda c: c["label"] == label)[0]
     return F.coalesce(first["value"], F.lit(""))
 
 
-def _freeform() -> Column:
-    return _clean_utf8(F.col("addresses")[0]["freeform"])
+def _get_first_address_freeform() -> Column:
+    return _replace_invalid_utf8(F.col("addresses")[0]["freeform"])
 
 
-def _parsed_components() -> Column:
-    """Libpostal components of the first address. Projected once as ``_COMPONENTS``."""
-    locality = _clean_utf8(F.col("addresses")[0]["locality"])
-    query = F.concat_ws(" ", _freeform(), locality)
+def _parse_first_address() -> Column:
+    """Libpostal components of the first address. Projected once as ``_PARSED_ADDRESS``."""
+    locality = _replace_invalid_utf8(F.col("addresses")[0]["locality"])
+    query = F.concat_ws(" ", _get_first_address_freeform(), locality)
     return F.when(F.trim(query) != "", ParseAddress(query))
 
 
-def _address_columns(freeform: Column, components: Column) -> tuple[Column, Column]:
-    """``house_number`` and ``address`` from a ``freeform`` address and its parsed ``components``."""
-    house_number = _component(components, "house_number")
+def _normalize_address(parsed_address: Column, freeform: Column) -> Column:
+    """Street-only ``address`` from ``parsed_address`` components and raw ``freeform``."""
+    house_number = _get_address_component(parsed_address, "house_number")
     street = _java_trim(
         F.regexp_replace(
-            F.regexp_replace(_component(components, "road"), "[,;]", " "), r"\s+", " "
+            F.regexp_replace(
+                _get_address_component(parsed_address, "road"), "[,;]", " "
+            ),
+            r"\s+",
+            " ",
         )
     )
     raw_freeform = F.coalesce(freeform, F.lit(""))
@@ -117,20 +123,21 @@ def _address_columns(freeform: Column, components: Column) -> tuple[Column, Colu
     #    address field.
     # 3. It found a house number: use the raw address with that number removed.
     # 4. Otherwise use the raw address as given.
-    address = (
+    return (
         F.when(street != "", street)
-        .when(_java_trim(_component(components, "city")) != "", F.lit(""))
+        .when(
+            _java_trim(_get_address_component(parsed_address, "city")) != "", F.lit("")
+        )
         .when(
             house_number != "",
             _java_trim(F.replace(raw_freeform, house_number, F.lit(""))),
         )
         .otherwise(raw_freeform)
     )
-    return house_number, address
 
 
-def _website_columns(df: DataFrame) -> tuple[Column, Column]:
-    """Hosts and host-plus-path URLs of ``websites``, lowercased, per website."""
+def _extract_website_domains_and_urls(df: DataFrame) -> tuple[Column, Column]:
+    """Distinct lowercased hosts and ``host/path`` URLs from ``websites``."""
     no_websites = F.array().cast("array<string>")
     websites = (
         F.coalesce(F.col("websites"), no_websites)
@@ -144,83 +151,100 @@ def _website_columns(df: DataFrame) -> tuple[Column, Column]:
             F.regexp_extract(F.lower(u), _HOST_AND_PATH, 1), "/+$", ""
         ),
     )
-    return hosts, urls
+    website_domains = F.array_distinct(F.filter(hosts, lambda h: h != ""))
+    website_urls = F.array_distinct(F.filter(urls, lambda u: u.contains(".")))
+    return website_domains, website_urls
 
 
-def _signature(*parts: Column) -> Column:
+def _build_signature(*parts: Column) -> Column:
     """Lowercased parts joined by ``@``. Null parts are skipped."""
     return F.lower(F.concat_ws(_SIGNATURE_SEPARATOR, *parts))
 
 
-def _matching_columns(
-    df: DataFrame, provider: Column, text: TextFns
+def _prepare_columns_for_matching(
+    df: DataFrame, provider: Column, text_functions: TextFunctions
 ) -> dict[str, Column]:
-    """Column expressions for one side. ``df`` must carry the parsed ``_COMPONENTS``."""
-    country = _clean_utf8(F.col("addresses")[0]["country"])
-    house_number, address = _address_columns(_freeform(), F.col(_COMPONENTS))
+    """Column expressions for matching on one side. ``df`` must carry ``_PARSED_ADDRESS``."""
+    country = _replace_invalid_utf8(F.col("addresses")[0]["country"])
+    parsed_address = F.col(_PARSED_ADDRESS)
+    house_number = _get_address_component(parsed_address, "house_number")
+    address = _normalize_address(parsed_address, _get_first_address_freeform())
     name = F.col("names.primary")
-    name_clean = text.normalize(name)
-    address_clean = text.normalize(address)
-    name_tokens = text.tokenize(name_clean)
-    lat = F.expr("ST_Y(ST_GeomFromWKB(geometry))")
-    lng = F.expr("ST_X(ST_GeomFromWKB(geometry))")
-    quadkey = focal_quadkey(lat, lng, BLOCKING_RESOLUTION)
-    source = _source(F.col("sources"))
-    cell = F.expr("ST_H3CellIDs(ST_GeomFromWKB(geometry), 9, false)[0]")
-    stripped_tokens = text.strip_background(name_tokens, cell)
-    hosts, urls = _website_columns(df)
+    name_clean = text_functions.normalize_text(name)
+    address_clean = text_functions.normalize_text(address)
+    name_clean_tokens = text_functions.tokenize_text(name_clean)
+    latitude = F.expr("ST_Y(ST_GeomFromWKB(geometry))")
+    longitude = F.expr("ST_X(ST_GeomFromWKB(geometry))")
+    quadkey = get_focal_quadkey(latitude, longitude, BLOCKING_RESOLUTION)
+    primary_source = _get_primary_source(F.col("sources"))
+    h3_res9_cell = F.expr("ST_H3CellIDs(ST_GeomFromWKB(geometry), 9, false)[0]")
+    name_clean_stripped_tokens = text_functions.strip_background_tokens(
+        name_clean_tokens, h3_res9_cell
+    )
+    website_domains, website_urls = _extract_website_domains_and_urls(df)
     return {
         "id": F.col("id"),
         "name": name,
         "address": address,
         "name_clean": name_clean,
-        "name_clean_tokens": name_tokens,
-        "name_clean_stripped": F.concat_ws(" ", stripped_tokens),
-        "name_clean_stripped_tokens": stripped_tokens,
+        "name_clean_tokens": name_clean_tokens,
+        "name_clean_stripped": F.concat_ws(" ", name_clean_stripped_tokens),
+        "name_clean_stripped_tokens": name_clean_stripped_tokens,
         "address_clean": address_clean,
-        "address_clean_tokens": text.tokenize(address_clean),
-        "latitude": lat,
-        "longitude": lng,
+        "address_clean_tokens": text_functions.tokenize_text(address_clean),
+        "latitude": latitude,
+        "longitude": longitude,
         "house_number": house_number,
         "country": country,
-        "normalized_phone": F.udf(normalize_phone, StringType())(
-            _clean_utf8(F.col("phones")[0]), country
+        "normalized_phone": F.udf(normalize_phone_number, StringType())(
+            _replace_invalid_utf8(F.col("phones")[0]), country
         ),
         "blocking_keys": F.array(quadkey),
-        "primary_source": source,
-        "signature": _signature(
-            source, quadkey, name, address, F.col("taxonomy.primary")
+        "primary_source": primary_source,
+        "signature": _build_signature(
+            primary_source, quadkey, name, address, F.col("taxonomy.primary")
         ),
         "provider": provider,
         "taxonomy_primary": F.coalesce(F.col("taxonomy.primary"), F.lit("")),
-        "website_domains": F.array_distinct(F.filter(hosts, lambda h: h != "")),
-        "website_urls": F.array_distinct(F.filter(urls, lambda u: u.contains("."))),
+        "website_domains": website_domains,
+        "website_urls": website_urls,
     }
 
 
-def _select_matching_columns(
-    df: DataFrame, provider: Column, text: TextFns, extra_columns: dict[str, Column]
+def _select_columns_for_matching(
+    df: DataFrame,
+    provider: Column,
+    text_functions: TextFunctions,
+    extra_columns: dict[str, Column],
 ) -> DataFrame:
-    """Project ``df`` to the matching columns plus ``extra_columns``."""
-    columns = _matching_columns(df, provider, text) | extra_columns
+    """Project ``df`` to the columns for matching plus ``extra_columns``."""
+    columns = (
+        _prepare_columns_for_matching(df, provider, text_functions) | extra_columns
+    )
     # Parsing is expensive, so it is projected once and every field reads that column.
-    parsed = df.withColumn(_COMPONENTS, _parsed_components())
+    parsed = df.withColumn(_PARSED_ADDRESS, _parse_first_address())
     return parsed.select(*[c.alias(n) for n, c in columns.items()])
 
 
-def prepare_candidates(df: DataFrame, provider: str, text: TextFns) -> DataFrame:
+def prepare_candidates(
+    df: DataFrame, provider: str, text_functions: TextFunctions
+) -> DataFrame:
     """Candidates with the columns matching reads, before ``base_ids``.
 
     Args:
         df: Raw candidate places.
         provider: Stamped on every row.
-        text: The text functions.
+        text_functions: The text functions.
     """
     # One shuffle by id up front so later joins start co-partitioned.
-    return _select_matching_columns(df.repartition("id"), F.lit(provider), text, {})
+    return _select_columns_for_matching(
+        df.repartition("id"), F.lit(provider), text_functions, {}
+    )
 
 
-def baseline_provider_column(df: DataFrame, baseline_provider: str | None) -> Column:
+def get_baseline_provider_column(
+    df: DataFrame, baseline_provider: str | None
+) -> Column:
     """The baseline's provider: its ``provider`` column, or ``baseline_provider`` as a literal.
 
     Raises:
@@ -236,21 +260,23 @@ def baseline_provider_column(df: DataFrame, baseline_provider: str | None) -> Co
     return F.col("provider") if has_provider else F.lit(baseline_provider)
 
 
-def prepare_baseline(df: DataFrame, provider: Column, text: TextFns) -> DataFrame:
+def prepare_baseline(
+    df: DataFrame, provider: Column, text_functions: TextFunctions
+) -> DataFrame:
     """Baseline with the columns matching reads, plus ``active``.
 
     Args:
         df: Raw baseline places.
-        provider: The baseline's provider, from ``baseline_provider_column``.
-        text: The text functions.
+        provider: The baseline's provider, from ``get_baseline_provider_column``.
+        text_functions: The text functions.
     """
     active = (
         F.when(F.col("corpus_state") == _ACTIVE_STATE, F.lit(1)).otherwise(F.lit(0))
         if "corpus_state" in df.columns
         else F.lit(1)
     )
-    return _select_matching_columns(
-        df.repartition("id"), provider, text, {"active": active}
+    return _select_columns_for_matching(
+        df.repartition("id"), provider, text_functions, {"active": active}
     )
 
 
