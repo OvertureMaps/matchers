@@ -4,7 +4,7 @@
 
 import pytest
 
-from overture_matchers.clustering import connected_components
+from overture_matchers.clustering import compute_connected_components
 
 
 def test_sedona_functions_blocking_uses(spark):
@@ -20,6 +20,8 @@ def test_graphframes_connected_components(graph_session):
     edges = graph_session.createDataFrame(
         [("a", "b"), ("b", "c"), ("d", "e")], ["src", "dst"]
     )
-    component = {r.id: r.component for r in connected_components(edges).collect()}
+    component = {
+        row.id: row.component for row in compute_connected_components(edges).collect()
+    }
     assert component["a"] == component["b"] == component["c"] != component["d"]
     assert component["d"] == component["e"]

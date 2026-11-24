@@ -13,16 +13,16 @@ from overture_matchers.clustering import (
     CANDIDATE_BASELINE,
     CANDIDATE_CANDIDATE,
     MATCH,
-    MATCH_COLUMNS,
+    MATCH_RESULT_COLUMNS,
     NO_MATCH,
-    connected_components,
+    compute_connected_components,
 )
 from overture_matchers.prematch import BASELINE, CANDIDATE
 
 if TYPE_CHECKING:
     from pyspark.sql import Column, DataFrame
 
-SCORED_PAIR_TYPES = {
+SCORED_PAIR_COLUMN_TYPES = {
     "id": "string",
     "record_type": "string",
     "base_id": "string",
@@ -33,33 +33,36 @@ SCORED_PAIR_TYPES = {
     "base_provider": "string",
 }
 # Paired sides that swap so the candidate lands on the ``id`` side.
-SWAPPED_SIDES = (
+SWAPPED_SIDE_COLUMNS = (
     ("id", "base_id"),
     ("record_type", "base_record_type"),
     ("provider", "base_provider"),
 )
 
 
-def accepted_pairs(scores: DataFrame, history: DataFrame) -> DataFrame:
-    """Scored pairs and history pairs with ``prediction`` of at least 1.
+def select_accepted_pairs(scores: DataFrame, history_pairs: DataFrame) -> DataFrame:
+    """Select scored pairs and history pairs with ``prediction`` of at least 1.
 
     Args:
         scores: Scored pairs, with at least the scored-pair columns.
-        history: History pairs, with the scored-pair columns.
+        history_pairs: History pairs, with the scored-pair columns.
 
     Returns:
-        The scored-pair columns, cast to ``SCORED_PAIR_TYPES``.
+        The scored-pair columns, cast to ``SCORED_PAIR_COLUMN_TYPES``.
     """
-    columns = [F.col(c).cast(t).alias(c) for c, t in SCORED_PAIR_TYPES.items()]
+    columns = [
+        F.col(column_name).cast(column_type).alias(column_name)
+        for column_name, column_type in SCORED_PAIR_COLUMN_TYPES.items()
+    ]
     return (
         scores.select(*columns)
-        .unionByName(history.select(*columns))
+        .unionByName(history_pairs.select(*columns))
         .where(F.col("prediction") >= 1)
     )
 
 
-def _match_sub_type(record_type: Column, base_record_type: Column) -> Column:
-    """The pair's sub-type. A record type other than the two known ones raises."""
+def _classify_match_sub_type(record_type: Column, base_record_type: Column) -> Column:
+    """Classify the pair's sub-type, raising on an unknown record type."""
     return (
         F.when(
             ((record_type == CANDIDATE) & (base_record_type == BASELINE))
@@ -84,59 +87,76 @@ def _match_sub_type(record_type: Column, base_record_type: Column) -> Column:
     )
 
 
-def _required_score(score: Column) -> Column:
-    """``score``, raising on a null. The schema marks it non-nullable."""
+def _require_non_null_score(composite_score: Column) -> Column:
+    """Return ``composite_score`` as non-nullable, raising on a null."""
     # coalesce is non-nullable when its last argument is. raise_error fires first.
-    checked = F.when(score.isNull(), F.raise_error(F.lit("null composite_score")))
-    return F.coalesce(checked.otherwise(score), F.lit(0.0))
+    checked = F.when(
+        composite_score.isNull(), F.raise_error(F.lit("null composite_score"))
+    )
+    return F.coalesce(checked.otherwise(composite_score), F.lit(0.0))
 
 
-def match_rows(pairs: DataFrame, components: DataFrame) -> DataFrame:
-    """One MATCH row per accepted pair, in the cluster of its ``id``.
+def build_clustered_match_rows(
+    accepted_pairs: DataFrame, components: DataFrame
+) -> DataFrame:
+    """Build one MATCH row per accepted pair, in the cluster of its ``id``.
 
     Args:
-        pairs: Accepted pairs, in the scored-pair columns.
-        components: ``id`` and ``component`` for every ID in ``pairs``.
+        accepted_pairs: Accepted pairs, in the scored-pair columns.
+        components: ``id`` and ``component`` for every ID in ``accepted_pairs``.
 
     Returns:
         ``matches`` rows. A baseline-candidate pair swaps sides, so the
         candidate is on the ``id`` side.
     """
-    p = pairs.alias("p")
-    swap = (F.col("p.record_type") == BASELINE) & (
-        F.col("p.base_record_type") == CANDIDATE
+    aliased_pairs = accepted_pairs.alias("pairs")
+    should_swap = (F.col("pairs.record_type") == BASELINE) & (
+        F.col("pairs.base_record_type") == CANDIDATE
     )
     sides = {}
-    for left, right in SWAPPED_SIDES:
-        sides[left] = F.when(swap, F.col(f"p.{right}")).otherwise(F.col(f"p.{left}"))
-        sides[right] = F.when(swap, F.col(f"p.{left}")).otherwise(F.col(f"p.{right}"))
-    sub_type = _match_sub_type(F.col("p.record_type"), F.col("p.base_record_type"))
+    for left_column, right_column in SWAPPED_SIDE_COLUMNS:
+        sides[left_column] = F.when(
+            should_swap, F.col(f"pairs.{right_column}")
+        ).otherwise(F.col(f"pairs.{left_column}"))
+        sides[right_column] = F.when(
+            should_swap, F.col(f"pairs.{left_column}")
+        ).otherwise(F.col(f"pairs.{right_column}"))
+    sub_type = _classify_match_sub_type(
+        F.col("pairs.record_type"), F.col("pairs.base_record_type")
+    )
     columns = {
         **sides,
-        "composite_score": _required_score(F.col("p.composite_score")),
-        "cluster_id": F.col("c.component").cast("string"),
+        "composite_score": _require_non_null_score(F.col("pairs.composite_score")),
+        "cluster_id": F.col("components.component").cast("string"),
         # Always MATCH. Deriving it from the data keeps it nullable in the
         # written schema, where a literal would be folded to non-nullable.
         "match_type": F.when(sub_type.isNotNull(), F.lit(MATCH)),
         "match_sub_type": sub_type,
         "base_active": F.lit(1),
     }
-    return p.join(components.alias("c"), F.col("p.id") == F.col("c.id")).select(
-        *(columns[c].alias(c) for c in MATCH_COLUMNS)
+    return aliased_pairs.join(
+        components.alias("components"), F.col("pairs.id") == F.col("components.id")
+    ).select(
+        *(
+            columns[column_name].alias(column_name)
+            for column_name in MATCH_RESULT_COLUMNS
+        )
     )
 
 
-def no_match_rows(candidates: DataFrame, pairs: DataFrame) -> DataFrame:
-    """One NO_MATCH row, in a new random cluster, per candidate in no pair.
+def build_no_match_rows(candidates: DataFrame, accepted_pairs: DataFrame) -> DataFrame:
+    """Build one NO_MATCH row, in a new random cluster, per unpaired candidate.
 
     Args:
         candidates: Candidates with ``id`` and ``provider``.
-        pairs: Accepted pairs. An ID on either side counts as paired.
+        accepted_pairs: Accepted pairs. An ID on either side counts as paired.
 
     Returns:
         ``matches`` rows with no baseline side and a score of 0.
     """
-    paired = pairs.select("id").union(pairs.select(F.col("base_id").alias("id")))
+    paired_ids = accepted_pairs.select("id").union(
+        accepted_pairs.select(F.col("base_id").alias("id"))
+    )
     columns = {
         "id": F.col("id"),
         "provider": F.col("provider"),
@@ -152,22 +172,29 @@ def no_match_rows(candidates: DataFrame, pairs: DataFrame) -> DataFrame:
     }
     return (
         candidates.select("id", "provider")
-        .join(paired, "id", "left_anti")
-        .select(*(columns[c].alias(c) for c in MATCH_COLUMNS))
+        .join(paired_ids, "id", "left_anti")
+        .select(
+            *(
+                columns[column_name].alias(column_name)
+                for column_name in MATCH_RESULT_COLUMNS
+            )
+        )
     )
 
 
-def match_results(pairs: DataFrame, candidates: DataFrame) -> DataFrame:
-    """The ``matches`` output: clustered pairs plus unpaired candidates.
+def build_match_results(accepted_pairs: DataFrame, candidates: DataFrame) -> DataFrame:
+    """Build the ``matches`` output from clustered pairs and unpaired candidates.
 
     Args:
-        pairs: Accepted pairs, in the scored-pair columns.
+        accepted_pairs: Accepted pairs, in the scored-pair columns.
         candidates: Every candidate, with ``id`` and ``provider``.
 
     Returns:
         NO_MATCH rows, then MATCH rows. Unpaired baseline records get no row.
     """
-    edges = pairs.select(F.col("id").alias("src"), F.col("base_id").alias("dst"))
-    return no_match_rows(candidates, pairs).unionByName(
-        match_rows(pairs, connected_components(edges))
+    edges = accepted_pairs.select(
+        F.col("id").alias("src"), F.col("base_id").alias("dst")
+    )
+    return build_no_match_rows(candidates, accepted_pairs).unionByName(
+        build_clustered_match_rows(accepted_pairs, compute_connected_components(edges))
     )

@@ -13,7 +13,7 @@ from overture_matchers.clustering import (
     BASELINE_BASELINE,
     CANDIDATE_BASELINE,
     CANDIDATE_CANDIDATE,
-    MATCH_COLUMNS,
+    MATCH_RESULT_COLUMNS,
     NO_MATCH,
 )
 from overture_matchers.prematch import CANDIDATE
@@ -23,16 +23,16 @@ if TYPE_CHECKING:
 
 
 # Defaults of the numeric match columns. The rest are strings.
-NUMERIC_DEFAULTS = {"composite_score": -1.0, "base_active": 1}
+NUMERIC_COLUMN_DEFAULTS = {"composite_score": -1.0, "base_active": 1}
 
 
 def coalesce_match_schema(matches: DataFrame) -> DataFrame:
     """Add the match columns that ``matches`` lacks, with null (or default) values."""
-    for name in MATCH_COLUMNS:
-        if name not in matches.columns:
-            default = NUMERIC_DEFAULTS.get(name)
+    for column_name in MATCH_RESULT_COLUMNS:
+        if column_name not in matches.columns:
+            default = NUMERIC_COLUMN_DEFAULTS.get(column_name)
             value = F.lit(None).cast("string") if default is None else F.lit(default)
-            matches = matches.withColumn(name, value)
+            matches = matches.withColumn(column_name, value)
     return matches
 
 

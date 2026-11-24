@@ -44,7 +44,7 @@ from overture_matchers.places.blocking import (
     get_shuffle_partition_count,
     repartition_by_pair_key,
 )
-from overture_matchers.places.matches import accepted_pairs, match_results
+from overture_matchers.places.matches import build_match_results, select_accepted_pairs
 from overture_matchers.places.metric_inputs import load_optional_metric_inputs
 from overture_matchers.places.metrics import METRICS
 from overture_matchers.places.model import (
@@ -231,15 +231,17 @@ def matching(
         "scores",
         FEATURE_TYPE,
     )
-    validated = accepted_pairs(scores, generate_history_pairs(prepared.candidates))
+    accepted_pairs = select_accepted_pairs(
+        scores, generate_history_pairs(prepared.candidates)
+    )
     if output_debug:
-        validated = io.checkpoint(
-            validated, output_path, "matches_validated", FEATURE_TYPE
+        accepted_pairs = io.checkpoint(
+            accepted_pairs, output_path, "matches_validated", FEATURE_TYPE
         )
     else:
         # Clustering and the NO_MATCH rows both read the accepted pairs.
-        validated = validated.persist(StorageLevel.MEMORY_AND_DISK)
-    return MatchingOutput(match_results(validated, prepared.candidates))
+        accepted_pairs = accepted_pairs.persist(StorageLevel.MEMORY_AND_DISK)
+    return MatchingOutput(build_match_results(accepted_pairs, prepared.candidates))
 
 
 def assign_ids(
