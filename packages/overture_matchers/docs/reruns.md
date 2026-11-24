@@ -27,10 +27,8 @@ Each feature type has its own marker. Jobs can match several feature types in on
 
 ## Changed params
 
-Skipped stages keep the outputs from the earlier run. Rerunning with changed params would combine those outputs with stages run under the new params, so the final result would match neither set of params.
-
 > [!WARNING]
-> After the first stage finishes, reruns fail if the params changed. Start a new run folder instead.
+> Reruns with changed params fail once the first stage has finished. Finished stages keep their outputs, so the rerun would combine those outputs with stages run under the new params, and the results would match neither set of params. Start a new run folder instead.
 
 The check compares the params against `config.json` in the run folder. Before the first stage finishes, nothing depends on the old params. The new `config.json` then replaces the old file, so corrected params work in the same folder.
 
