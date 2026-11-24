@@ -1,6 +1,6 @@
 # overture-matchers docs
 
-Technical detail for the [overture-matchers](../README.md) package. The package README stays an overview, because PyPI displays it. Anything longer belongs here.
+Technical detail for the [overture-matchers](../README.md) package. PyPI displays the package README, so the README stays an overview. Longer material belongs in these pages.
 
 ## How-to
 
@@ -19,11 +19,11 @@ Technical detail for the [overture-matchers](../README.md) package. The package 
 
 | Page | Covers |
 | --- | --- |
-| [reruns.md](reruns.md) | Why a run resumes, how stage markers decide what runs, and why changed params need a new folder. |
+| [reruns.md](reruns.md) | Why runs resume, how stage markers decide what runs, and why changed params need a new folder. |
 | [python-migration.md](../../../docs/python-migration.md) | The repo-wide design for the port from Scala. |
 
 ## Adding a page
 
-Each page serves one need: a how-to gives the steps for a task, a reference page lists facts to look up, and an explanation page gives the reasoning. Add a reference page per theme job as it is ported, and split a page that starts to serve two needs.
+Each page serves one need. How-to pages give the steps for tasks, reference pages list facts to look up, and explanation pages give the reasoning. Add one reference page per theme job as the jobs are ported, and split pages that start to serve two needs.
 
-Keep every page platform agnostic: describe what the package does on any Spark platform, and leave the deployment detail of one platform to the repository that deploys it.
+Keep every page platform agnostic: describe what the package does on every Spark platform, and leave platform-specific deployment detail to the repositories that deploy the package.

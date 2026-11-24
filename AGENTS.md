@@ -4,7 +4,7 @@ Instructions for AI agents working in this repository.
 
 ## Repository
 
-This repository is the Python port of Overture's Scala matchers, which assign GERS IDs by matching incoming records against the Overture baseline. The port's design, structure and sequencing are in [docs/python-migration.md](docs/python-migration.md). Read it before porting a stage or adding a theme.
+This repository is the Python port of Overture's Scala matchers, which assign GERS IDs by matching incoming records against the Overture baseline. The port's design, structure and sequencing are in [docs/python-migration.md](docs/python-migration.md). Read the design doc before porting stages or adding themes.
 
 | Path | Holds |
 | --- | --- |
@@ -27,16 +27,16 @@ uv run ruff check . && uv run ruff format --check .   # from the repo root
 
 ## Conventions
 
-- Name functions verbosely, with a clear verb. A function's name is never shorter or vaguer than its Scala counterpart.
+- Name functions verbosely, with a clear verb. Function names are never shorter or vaguer than their Scala counterparts.
 - Keep the Scala matchers' names for job params and output folders, so a Python run and a Scala run stay comparable.
 - Start every Python file with the SPDX license and copyright header the existing files carry.
 - Leave the `pyspark` and `apache-sedona` pins alone unless the production Spark runtime changes. They match it on purpose.
 - Add tests in the package's `tests/` directory. They share one local Sedona session through the `spark` fixture.
-- Title a pull request with a Conventional Commits type, such as `fix:` or `docs:`. Merging to `main` releases every package whose shipped files changed, and the type sets the version bump. See [PACKAGE_VERSIONING.md](docs/PACKAGE_VERSIONING.md).
+- Title pull requests with a Conventional Commits type, such as `fix:` or `docs:`. Merging to `main` releases every package whose shipped files changed, and the type sets the version bump. See [PACKAGE_VERSIONING.md](docs/PACKAGE_VERSIONING.md).
 
 ## Update the docs in the same change
 
-A change to the behavior of `packages/overture_matchers` updates the doc that describes it, in the same pull request. Find the doc from the code touched:
+Behavior changes to `packages/overture_matchers` update the matching docs in the same pull request. Find the doc from the code touched:
 
 | Code changed | Doc to update |
 | --- | --- |
@@ -49,7 +49,7 @@ A change to the behavior of `packages/overture_matchers` updates the doc that de
 | A new module | A row in the README's Modules table |
 | Install or run commands, or the pinned Spark and Sedona versions in `pyproject.toml` | The Install and Run sections of `packages/overture_matchers/README.md` |
 
-A change with no behavior a reader can observe needs no doc edit. Do not add one to show the docs were considered.
+Skip the doc edit when no reader-observable behavior changes. Do not add doc edits to show the docs were considered.
 
 ## Rules for the package README
 
@@ -58,15 +58,15 @@ A change with no behavior a reader can observe needs no doc edit. Do not add one
 - Keep it an overview: description, install, run, the Modules and Jobs tables, and links. Detail goes in `packages/overture_matchers/docs/`.
 - Use absolute `https://` links only. PyPI does not resolve relative links.
 - No Mermaid diagrams and no GitHub admonitions (`> [!NOTE]`). PyPI renders neither.
-- A Modules row describes the module's scope, not an inventory of its functions, so it stays true as the module grows.
-- Any edit to this file releases a patch version on merge, because it is in the package's release path filters. Edits under `docs/` do not.
+- Modules rows describe each module's scope, not an inventory of functions, so the rows stay true as modules grow.
+- Edits to this file release a patch version on merge, because the file is in the package's release path filters. Edits under `docs/` do not.
 
 ## Rules for every doc
 
 - Document only what the code does. Read the source for each claim before writing it, and never describe planned behavior as present.
 - Write in the present tense about the code as it is. No history, no roadmap, and no Status sections: the `Development Status` classifier in `pyproject.toml` carries the package's maturity.
-- Stay platform agnostic. Describe what the package does on any Spark platform, and leave one platform's deployment detail to the repository that deploys it.
-- Give each page in `docs/` one purpose: steps for a task (how-to), facts to look up (reference), or reasoning (explanation). Split a page that starts to serve two, and list every page under its group in `docs/README.md`.
+- Stay platform agnostic. Describe what the package does on every Spark platform, and leave platform-specific deployment detail to the repositories that deploy the package.
+- Give each page in `docs/` one purpose: steps for a task (how-to), facts to look up (reference), or reasoning (explanation). Split pages that start to serve two purposes, and list every page under its group in `docs/README.md`.
 - Open each Mermaid flowchart with the theme directive the existing diagrams use, and state its takeaway in the sentence above it.
 
 ## Check before finishing
@@ -78,4 +78,4 @@ uv build --out-dir /tmp/overture-matchers-dist
 uvx twine check /tmp/overture-matchers-dist/*
 ```
 
-After editing a page in `docs/`, confirm that every relative link in it resolves to a file, and that no other doc still links to a page that was renamed.
+After editing pages in `docs/`, confirm that every relative link resolves to a file, and that no doc links to a renamed page.

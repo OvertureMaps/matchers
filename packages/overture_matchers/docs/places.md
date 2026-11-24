@@ -6,13 +6,13 @@
 
 On top of the required params, `input` and `baseline` each need a `place` entry, and `modelJar` is required.
 
-The job needs GraphFrames on the Spark session. A local run adds it from the Maven coordinates in `job.PACKAGES`. A run on a managed platform does not, so the job's deployment has to supply the package.
+The job needs GraphFrames on the Spark session. Local runs add GraphFrames from the Maven coordinates in `job.PACKAGES`. Runs on managed platforms do not, so the deployments have to supply the package.
 
-The job sets the Spark checkpoint directory to `checkpoints/` in the run folder, which GraphFrames connected components needs.
+GraphFrames connected components needs a Spark checkpoint directory, so the job sets the directory to `checkpoints/` in the run folder.
 
 ## Stages
 
-The stages run in order. Each stage's outputs feed the next one, and later stages also read the outputs of the earlier ones.
+The stages run in order. Each stage's outputs feed the next stage, and later stages also read the outputs of earlier stages.
 
 ```mermaid
 %%{init: {"theme": "dark", "flowchart": {"padding": 14}, "themeVariables": {"fontSize": "14px", "fontFamily": "Montserrat, Arial, sans-serif", "mainBkg": "#001A39", "nodeBorder": "#0EC1BD", "lineColor": "#4051CC", "primaryTextColor": "#FFFFFF", "edgeLabelBackground": "#001A39"}}}%%

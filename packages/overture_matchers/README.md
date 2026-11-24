@@ -7,7 +7,7 @@
 
 Python matchers for conflating Overture Maps data: places, divisions, and addresses.
 
-A matcher assigns IDs. It compares incoming records from a data provider against the Overture baseline. A record that matches takes the baseline record's GERS ID, and a record that matches nothing gets a new one.
+Matchers assign IDs. Each matcher compares incoming records from a data provider against the Overture baseline. Matching records take the baseline record's GERS ID, and unmatched records get new IDs.
 
 ## Install
 
@@ -15,17 +15,17 @@ A matcher assigns IDs. It compares incoming records from a data provider against
 uv add overture-matchers
 ```
 
-PySpark and Sedona are not runtime dependencies, because the Spark platform that runs a job provides both. An environment without them, such as a local run, needs them installed alongside the package. The package is tested against these versions:
+PySpark and Sedona are not runtime dependencies, because Spark platforms provide both. Other environments, such as local runs, need PySpark and Sedona installed alongside the package. The package's tests run against these versions:
 
 ```sh
 uv add overture-matchers 'pyspark[sql]==3.5.4' apache-sedona==1.8.1
 ```
 
-A local Spark session also needs Java 17.
+Local Spark sessions also need Java 17.
 
 ## Run
 
-On a managed Spark platform, `overture_matchers.places.job.PlacesMatchingJob` is the job class. It extends `SparkSedonaJob` from overture-spark, and its `run(params)` takes the job params as a dict.
+On managed Spark platforms, `overture_matchers.places.job.PlacesMatchingJob` is the job class. The class extends `SparkSedonaJob` from overture-spark, and the class's `run(params)` method takes the job params as a dict.
 
 Locally, each job module runs from the command line on a local Sedona session, with the params in a JSON file:
 
@@ -51,14 +51,14 @@ Every job param and the run folder layout are in the [run reference](https://git
 
 <!--
 When adding or editing a row: describe the module's scope (what kind of code
-belongs here), not an inventory of its current functions. The table should
-stay accurate as a module grows. Technical detail goes in docs/, not here.
+belongs here), not an inventory of current functions. The table should
+stay accurate as modules grow. Technical detail goes in docs/, not here.
 -->
 
 | Module | Scope |
 | --- | --- |
-| `core.config` | `RunConfig`, the settings for one run: parsing and validating job params, and guarding a run folder against a rerun with different params. |
-| `core.stages` | The typed outputs each stage returns, and `run_stage`, which runs a stage, writes its outputs, marks it done and skips it on a rerun. |
+| `core.config` | `RunConfig`, the settings for one run: parsing and validating job params, and guarding run folders against reruns with different params. |
+| `core.stages` | The typed outputs each stage returns, and `run_stage`, which runs each stage, writes the stage's outputs, marks the stage done and skips finished stages on reruns. |
 | `core.io` | Reads and writes inside the run folder: output paths, stage markers and lineage-cutting checkpoints. |
 | `core.local` | Running a job on a local Sedona session from a JSON params file. |
 | `places` | The places matcher. |
@@ -79,7 +79,7 @@ Technical detail lives in the package's [docs directory](https://github.com/Over
 | --- | --- |
 | Look up a param or the run folder layout | [Run reference](https://github.com/OvertureMaps/matchers/blob/main/packages/overture_matchers/docs/run-reference.md) |
 | Look up a job's stages and outputs | [Places job](https://github.com/OvertureMaps/matchers/blob/main/packages/overture_matchers/docs/places.md) |
-| Understand how a run resumes | [How reruns work](https://github.com/OvertureMaps/matchers/blob/main/packages/overture_matchers/docs/reruns.md) |
+| Understand how runs resume | [How reruns work](https://github.com/OvertureMaps/matchers/blob/main/packages/overture_matchers/docs/reruns.md) |
 | Understand the design of the port | [python-migration.md](https://github.com/OvertureMaps/matchers/blob/main/docs/python-migration.md) |
 
 ## Development

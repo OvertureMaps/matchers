@@ -1,10 +1,10 @@
 # How reruns work
 
-A matching run is long, so a failed run resumes instead of starting over. Rerunning a job on the same run folder repeats only the stages that did not finish.
+Matching runs are long, so failed runs resume instead of starting over. Reruns on the same run folder repeat only the unfinished stages.
 
 ## Stage markers
 
-Each stage writes its outputs to the run folder, then writes a marker. On a rerun, a stage with a marker is skipped, and its outputs are read back from the folder instead.
+Each stage writes its outputs to the run folder, then writes a marker. Reruns skip the marked stages and read those stages' outputs back from the folder.
 
 ```mermaid
 %%{init: {"theme": "dark", "flowchart": {"padding": 14}, "themeVariables": {"fontSize": "14px", "fontFamily": "Montserrat, Arial, sans-serif", "mainBkg": "#001A39", "nodeBorder": "#0EC1BD", "lineColor": "#4051CC", "primaryTextColor": "#FFFFFF", "edgeLabelBackground": "#001A39"}}}%%
@@ -19,19 +19,19 @@ flowchart LR
     D --> N[Next stage]
 ```
 
-The marker is written only after all of the stage's outputs. A stage interrupted partway has no marker, so it runs again and overwrites its partial outputs.
+Each marker is written only after all of the stage's outputs. Interrupted stages lack markers, so they rerun and overwrite their partial outputs.
 
-A stage always hands the next one a read of its outputs from the folder, whether it ran or was skipped. A resumed run therefore sees the same data as an uninterrupted one.
+Stages always hand the next stage a read of their outputs from the folder, whether the stages ran or were skipped. Resumed runs therefore see the same data as uninterrupted runs.
 
-Each feature type has its own marker, so a job that matches several feature types in one folder resumes each of them independently.
+Each feature type has its own marker. Jobs can match several feature types in one folder, and each feature type resumes independently.
 
 ## Changed params
 
-A skipped stage keeps the outputs it produced with the params of the earlier run. Mixing those with stages run under different params would give a result no single set of params describes.
+Skipped stages keep the outputs produced with the earlier run's params. Mixing those outputs with stages run under different params gives results that no single set of params describes.
 
 > [!WARNING]
-> A rerun with changed params fails once any stage has finished. Start a new run folder instead.
+> After the first stage finishes, reruns fail if the params changed. Start a new run folder instead.
 
-The check compares the params against the `config.json` in the run folder. Before any stage finishes, nothing depends on the old params, so a new `config.json` replaces the old one and a retry with corrected params works in the same folder.
+The check compares the params against `config.json` in the run folder. Before the first stage finishes, nothing depends on the old params. The new `config.json` then replaces the old file, so corrected params work in the same folder.
 
 The folder layout and the params are listed in the [run reference](run-reference.md).
