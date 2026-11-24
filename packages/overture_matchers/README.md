@@ -31,13 +31,9 @@ A local Spark session also needs Java 17.
 
 ## Run
 
-### On AWS Glue
+On AWS Glue, `overture_matchers.places.job.PlacesMatchingJob` is the job class. It extends `SparkSedonaJob` from overture-spark, and its `run(params)` takes the job params as a dict.
 
-`overture_matchers.places.job.PlacesMatchingJob` is the job class. It extends `SparkSedonaJob` from overture-spark, and its `run(params)` takes the [job params](#job-params) as a dict.
-
-### Locally
-
-Each job module runs from the command line on a local Sedona session, with the params in a JSON file:
+Locally, each job module runs from the command line on a local Sedona session, with the params in a JSON file:
 
 ```sh
 python -m overture_matchers.places.job params.json
@@ -55,45 +51,14 @@ python -m overture_matchers.places.job params.json
 
 The first local run downloads the Sedona, GraphFrames and hadoop-aws jars from Maven into `~/.ivy2` (about 750 MB).
 
-### Job params
-
-Params keep the Scala matchers' argument names, so an argument set from a Scala run works unchanged. Params outside this table are ignored.
-
-| Param | Required | Meaning |
-| --- | --- | --- |
-| `outputPath` | Yes | The run folder. Every output, the stage markers and `config.json` sit inside it. |
-| `input` | Yes | Incoming records, as a map of feature type to one parquet path or a list of them. A dict or a JSON string. |
-| `baseline` | Yes | Baseline records, in the same shape as `input`. |
-| `provider` | Yes | The data provider of the incoming records. |
-| `matchHistory` | No | Whether candidates with history matches skip scoring. Defaults to `true`. |
-| `modelJar` | Places only | The `places-matcher-model` jar. |
-| `embeddingsCacheTable` | No | Accepted and recorded in `config.json`. No stage reads it yet. |
-| `previousMetricsPath` | No | Accepted and recorded in `config.json`. No stage reads it yet. |
-
-An `s3://` path is rewritten to `s3a://`, which works on any Spark platform with hadoop-aws.
-
-### Run folder
-
-A run writes zstd parquet under `outputPath`, one folder per output and feature type:
-
-```text
-<outputPath>/
-  config.json                               the run's settings and the package version
-  <output>/type=<feature_type>/             one stage output
-  _completed_stages/<stage>/type=<feature_type>   marker written after a stage's outputs
-  checkpoints/                              Spark checkpoint directory
-```
-
-A rerun on the same folder skips every stage that has a marker and reads that stage's outputs instead. A marker is written only after all of its stage's outputs, so an interrupted stage runs again.
-
-A rerun with changed params fails once any stage has finished, because the finished stages ran with the old params. Start a new run folder instead. Before any stage finishes, the new `config.json` replaces the old one.
+Every job param, the run folder layout and the rerun rules are in [Running a matcher](https://github.com/OvertureMaps/matchers/blob/main/packages/overture_matchers/docs/running.md).
 
 ## Modules
 
 <!--
 When adding or editing a row: describe the module's scope (what kind of code
 belongs here), not an inventory of its current functions. The table should
-stay accurate as a module grows.
+stay accurate as a module grows. Technical detail goes in docs/, not here.
 -->
 
 | Module | Scope |
@@ -108,18 +73,13 @@ stay accurate as a module grows.
 
 ## Jobs
 
-### `places.job.PlacesMatchingJob`
-
-Matches the `place` feature type. `input` and `baseline` each need a `place` entry, and `modelJar` is required. The job runs four stages in order:
-
-| Stage | Does | Outputs |
+| Job | Feature types | Detail |
 | --- | --- | --- |
-| `setup` | Normalizes candidates and baseline, and attaches history matches when `matchHistory` is true. | `candidates`, `baseline` |
-| `matching` | Generates pairs, scores them and clusters the matches. | `matches` |
-| `assign_ids` | Picks cluster winners and assigns GERS IDs. | `final`, `fallout` |
-| `metrics` | Counts matches and churn. | `metrics` |
+| `places.job.PlacesMatchingJob` | `place` | [Places job](https://github.com/OvertureMaps/matchers/blob/main/packages/overture_matchers/docs/places.md) |
 
-`final` holds the records with their IDs, and `fallout` holds the candidates folded into another record.
+## Documentation
+
+Technical detail lives in the package's [docs directory](https://github.com/OvertureMaps/matchers/tree/main/packages/overture_matchers/docs), one page per topic. The design for the port is in [python-migration.md](https://github.com/OvertureMaps/matchers/blob/main/docs/python-migration.md).
 
 ## Development
 
@@ -128,4 +88,4 @@ uv sync
 uv run pytest
 ```
 
-Source, issues and the contributing guide are in [OvertureMaps/matchers](https://github.com/OvertureMaps/matchers). The design for the port is in [python-migration.md](https://github.com/OvertureMaps/matchers/blob/main/docs/python-migration.md).
+Source, issues and the contributing guide are in [OvertureMaps/matchers](https://github.com/OvertureMaps/matchers).
