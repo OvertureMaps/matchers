@@ -9,7 +9,9 @@ from pyspark.sql import functions as F
 
 from overture_matchers.places.runtime import (
     bind_jvm_text_functions,
+    bind_unique_name_h3_bin_udf,
     register_text_udfs,
+    register_unique_name_h3_bin_udf,
 )
 
 
@@ -48,6 +50,20 @@ def test_bind_jvm_text_functions_builds_columns(spark):
     )
 
 
+def test_register_unique_name_h3_bin_udf_registers_bloom_feature():
+    spark = MagicMock()
+    jvm = spark.sparkContext._jvm
+    register_unique_name_h3_bin_udf(spark, b"ge2-bytes", b"ge10-bytes")
+    jvm.org.overturemaps.places.features.BloomFeatures.registerUniqueName.assert_called_once_with(
+        spark._jsparkSession, "unique_name_h3_bin", b"ge2-bytes", b"ge10-bytes"
+    )
+
+
+def test_bind_unique_name_h3_bin_udf_builds_column(spark):
+    compute_bin = bind_unique_name_h3_bin_udf()
+    assert compute_bin(F.lit("cafe"), F.lit(40.7128), F.lit(-74.006)) is not None
+
+
 @pytest.mark.normalizer
 def test_jvm_text_functions_against_model_jar(spark):
     register_text_udfs(spark)
@@ -69,3 +85,41 @@ def test_jvm_text_functions_against_model_jar(spark):
     assert row.clean == "joe s new york"
     assert row.tokens == ["joe", "new", "york"]
     assert row.stripped == ["joe"]
+
+
+@pytest.mark.normalizer
+def test_jvm_unique_name_h3_bin_against_model_jar(spark):
+    cell = spark.sql("SELECT ST_H3CellIDs(ST_Point(0.0, 0.0), 5, false)[0]").first()[0]
+
+    def serialize_filter(names):
+        keys = [(f"5:{cell}:{name}",) for name in names]
+        bloom = (
+            spark.createDataFrame(keys, ["k"])._jdf.stat().bloomFilter("k", 100, 0.001)
+        )
+        out = spark._jvm.java.io.ByteArrayOutputStream()
+        bloom.writeTo(out)
+        return bytes(out.toByteArray())
+
+    register_unique_name_h3_bin_udf(
+        spark, serialize_filter(["blue cafe", "rare"]), serialize_filter(["blue cafe"])
+    )
+    compute_bin = bind_unique_name_h3_bin_udf()
+    rows = spark.createDataFrame(
+        [
+            ("  Blue Cafe ", 0.0, 0.0),
+            ("rare", 0.0, 0.0),
+            ("other", 0.0, 0.0),
+            (" \t", 0.0, 0.0),
+            ("blue cafe", None, 0.0),
+        ],
+        "name string, latitude double, longitude double",
+    )
+    bins = [
+        row.bin
+        for row in rows.select(
+            compute_bin(F.col("name"), F.col("latitude"), F.col("longitude")).alias(
+                "bin"
+            )
+        ).collect()
+    ]
+    assert bins == [2, 1, 0, 0, 0]
