@@ -9,10 +9,6 @@ Python matchers for conflating Overture Maps data: places, divisions, and addres
 
 A matcher assigns IDs. It compares incoming records from a data provider against the Overture baseline. A record that matches takes the baseline record's GERS ID, and a record that matches nothing gets a new one.
 
-## Status
-
-The package is pre-alpha. It is a port of Overture's Scala matchers, and the port is in progress. The package holds the shared run framework and the places job's wiring. The four places stages raise `NotImplementedError`, and the divisions and addresses matchers are not in the package yet. Progress is tracked in [OvertureMaps/matchers#1](https://github.com/OvertureMaps/matchers/issues/1).
-
 ## Install
 
 ```sh
