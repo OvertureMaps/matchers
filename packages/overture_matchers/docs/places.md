@@ -2,10 +2,6 @@
 
 `overture_matchers.places.job.PlacesMatchingJob` matches the `place` feature type. The shared params and run folder layout are in [Running a matcher](running.md).
 
-## Status
-
-The job's wiring is in place: param checks, stage chaining, stage markers and the local runner. The four stage functions raise `NotImplementedError` until their logic is ported.
-
 ## Params
 
 On top of the required params, `input` and `baseline` each need a `place` entry, and `modelJar` is required.
