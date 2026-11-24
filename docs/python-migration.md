@@ -64,7 +64,7 @@ with TaskGroup("places_matching"):
         class_name="PlacesMatchingJob",
         packages="overture-matchers[places]==<version>",
         jars=[...],  # GraphFrames, the places-matcher-model jar (PlaceTextNormalizer)
-        sedona_version="1.8.1",
+        sedona_version="1.9.1",
         worker_cores=980,
         parameters={
             "outputPath": bundle.base_uri,
@@ -354,8 +354,8 @@ Each package is versioned from its own `<package>-v<version>` tags through pytho
 
 | Scala dependency | Python replacement | Note |
 | --- | --- | --- |
-| `com.wherobots:jpostal` 1.2.2 (OvertureMaps/overture-matchers#478) | Sedona 1.8.1 `ParseAddress` | Same jpostal build Sedona uses. Set `spark.sedona.libpostal.dataDir` to the v1.0.0 model data the Scala job uses today. Tested 100% identical to the earlier custom build on 449k public addresses. Sedona's default model download changes 18% of non-US addresses; do not use it during the port. |
-| Sedona 1.7.2 | Sedona 1.8.1 Python API | tf-data-platform pins one Sedona version for all jobs, and its libpostal jobs already use 1.8.1; regression-check the other Sedona jobs. |
+| `com.wherobots:jpostal` 1.2.2 (OvertureMaps/overture-matchers#478) | Sedona 1.9.1 `ParseAddress` | Same jpostal build Sedona uses. Set `spark.sedona.libpostal.dataDir` to the v1.0.0 model data the Scala job uses today. Sedona 1.9.1 still ships jpostal 1.2.2, so parsing matches 1.8.1. Tested 100% identical to the earlier custom build on 449k public addresses. Sedona's default model download changes 18% of non-US addresses; do not use it during the port. |
+| Sedona 1.7.2 | Sedona 1.9.1 Python API | tf-data-platform pins one Sedona version for all jobs. Its libpostal jobs use 1.8.1 today. 1.9.0 is the first version that reads libpostal data shipped with `sc.addFile` (see Details for agents). Regression-check the other Sedona jobs. |
 | xgboost4j-spark | `xgboost.Booster().load_model()` on the native booster file, `inplace_predict` in a pandas UDF | Numeric Arrow crossing costs about 0.85 µs/row. |
 | GraphFrames (Scala) | `graphframes` Python API | Same jar. |
 | libphonenumber | `phonenumbers` |  |
@@ -386,7 +386,7 @@ Until cutover, places keeps Scala's four stages and job params keep Scala's argu
 
 1. Parity harness (#2).
 2. Shared framework: `RunConfig`, I/O.
-3. Spike on a staging run, before porting places: Sedona 1.8.1 `ParseAddress` on the provider data where the custom jpostal build originally fixed an executor hang, and Python worker memory on Glue at full scale with rapidfuzz, a booster and the sketch readers loaded.
+3. Spike on a staging run, before porting places: Sedona 1.9.1 `ParseAddress` on the provider data where the custom jpostal build originally fixed an executor hang, and Python worker memory on Glue at full scale with rapidfuzz, a booster and the sketch readers loaded.
 4. Places setup stage: Sedona `ParseAddress` with the v1.0.0 data, phones, `PlaceTextNormalizer` JVM UDF, signatures.
 5. Places ID assignment and metrics.
 6. Places matcher (`PlacesUnionedMatcher` behavior only; `PlacesMatcher` is not ported).
@@ -408,7 +408,7 @@ Each theme cuts over to Python as a whole, once all its stages pass parity. Over
   - the match task switches from the Scala main class and jar to the job in `overture_matchers.places.job`, installed from PyPI at a pinned version
   - the match task stays one task running one job, `PlacesMatchingJob`, on one cluster, as Scala does today. An Airflow retry resumes at the first stage without a marker. Each theme gets its own task group
   - the Scala matcher version setting becomes a matcher package version, plus a model jar version, which today comes from the matcher's `pom.xml`
-  - the platform Sedona version moves to 1.8.1
+  - the platform Sedona version moves to 1.9.1
   - job params, extra jars and libpostal data change too (see Details for agents)
   - the match run becomes one `MatchBundle`, a new `Bundle` subclass, set up by the bundle initialize task group before the job and sealed by the finalize task group after it. Candidate and baseline paths are resolved at run time, so the initialize task group needs a way to record input paths from XCom; today it takes only `Bundle` objects known when the DAG is parsed. Between the job and finalization, a new task reads `config.json` and adds it to `metadata.json` under `matcher`. This replaces the current metadata step, which writes metadata directly after matching and records only candidates as inputs
   - readers of Scala's run folder (telemetry, match evaluation, the previous-metrics lookup, the helper that derives the run folder from the final output path) keep their paths inside the run folder. Only the run folder itself changes: the bundle base URI instead of `<outputPath>/<runId>`
@@ -524,8 +524,8 @@ Harness layout: `parity/` sits outside `packages/`, so nothing in it ships to Py
 - the DAG stops sending `scenario` and `environment`. `scenario` only feeds Scala's H3 ID generator, which places doesn't use, and `environment` only flags Scala's local test runs
 - the DAG sends `modelJar`, the path of the `places-matcher-model` jar
 - the DAG stops sending `runId`. Scala uses it to stamp `snapshot` (`<provider>-<theme>-<runId>`) on every metrics row. Python's metrics rows leave out `snapshot` and `stage`, and `MatcherTelemetryJob` fills both through `TelemetryEmitter`, which already builds the same snapshot from its own `run_id` param
-- the job's extra jars are GraphFrames (shaded into the Scala jar today), the `PlaceTextNormalizer` jar, and spark-nlp for divisions. jpostal and libphonenumber drop out: Sedona 1.8.1 ships jpostal, and phones use `phonenumbers`
-- libpostal model data: the Scala job receives it as a Glue extra file, which works only because a JVM job's params pass through as Glue arguments, and a Python job's params do not. Instead, the v1.0.0 model data sits unpacked under an S3 prefix, the job's Spark conf sets `spark.sedona.libpostal.dataDir` to it, and setup calls `sc.addFile(<prefix>, recursive=True)`, Sedona's documented mode for remote data. The `.so` files drop out
+- the job's extra jars are GraphFrames (shaded into the Scala jar today), the `PlaceTextNormalizer` jar, and spark-nlp for divisions. jpostal and libphonenumber drop out: Sedona 1.9.1 ships jpostal, and phones use `phonenumbers`
+- libpostal model data: the Scala job receives it as a Glue extra file, which works only because a JVM job's params pass through as Glue arguments, and a Python job's params do not. Instead, the v1.0.0 model data sits unpacked under an S3 prefix, the job's Spark conf sets `spark.sedona.libpostal.dataDir` to it, and setup calls `sc.addFile(<prefix>, recursive=True)`, Sedona's documented mode for remote data. This needs Sedona 1.9.0 or later. Older versions pass the S3 path straight to jpostal, which treats it as a missing local folder and quietly downloads a different model. The `.so` files drop out
 - the DAG stops reading the job's `outputResultFile`. The final path is fixed by the layout (`<outputPath>/final/type=<feature_type>/`), so the DAG builds the `{"<feature_type>": "<path>"}` map itself. The jobs write no result file and ignore an `outputResultFile` param, so cloned Scala arguments still run
 
 ### Local Docker runtime
