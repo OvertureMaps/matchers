@@ -15,6 +15,7 @@ from pyspark import StorageLevel
 
 from overture_matchers.core import io
 from overture_matchers.core.config import RunConfig
+from overture_matchers.core.libpostal import ship_libpostal_data_to_workers
 from overture_matchers.core.local import run_local
 from overture_matchers.core.stages import (
     AssignIdsOutput,
@@ -34,7 +35,6 @@ from overture_matchers.places.prepare import (
 from overture_matchers.places.runtime import (
     bind_jvm_text_functions,
     register_text_udfs,
-    ship_libpostal_data_to_workers,
 )
 
 if TYPE_CHECKING:

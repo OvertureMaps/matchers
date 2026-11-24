@@ -1,26 +1,23 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 by the Overture Maps Foundation
-"""Spark session setup for the places stages: shipping libpostal data to workers and registering the model jar's JVM text UDFs.
+"""Spark session setup for the places stages: registering the model jar's JVM text UDFs.
 
 The column logic in ``prepare`` takes its text functions as arguments, so it
-runs without the jar. Everything that needs the jar or the libpostal data lives here.
+runs without the jar. Everything that needs the jar lives here.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from urllib.parse import urlparse
 
 from pyspark.sql import functions as F
 from pyspark.sql.types import ArrayType, StringType
 
-from overture_matchers.core.config import rewrite_s3_to_s3a
 from overture_matchers.places.prepare import TextFunctions
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
 
-LIBPOSTAL_DATA_DIR_CONF = "spark.sedona.libpostal.dataDir"
 _BLOOM_FEATURES_CLASS = "org.overturemaps.places.features.BloomFeatures"
 _COREWORD_FILTER_RESOURCE = "/config/places/coreword_bg_filter.bin"
 _NORMALIZE_TEXT_UDF = "normalize_text"
@@ -53,27 +50,6 @@ def register_text_udfs(spark: SparkSession) -> None:
     jvm.org.overturemaps.places.features.BloomFeatures.registerCoreword(
         spark._jsparkSession, _STRIP_BACKGROUND_TOKENS_UDF, filter_bytes
     )
-
-
-def ship_libpostal_data_to_workers(spark: SparkSession) -> None:
-    """Send remote libpostal data to the workers.
-
-    Args:
-        spark: The session. ``spark.sedona.libpostal.dataDir`` must name the
-            unpacked v1.0.0 libpostal data.
-
-    Raises:
-        ValueError: The libpostal data dir is not set. Sedona's default
-            model would change addresses outside the US.
-    """
-    data_dir = spark.conf.get(LIBPOSTAL_DATA_DIR_CONF, None)
-    if not data_dir:
-        raise ValueError(f"set {LIBPOSTAL_DATA_DIR_CONF} to the libpostal v1.0.0 data")
-    # Local data dirs work as-is; only remote data needs shipping.
-    if urlparse(data_dir).scheme not in ("", "file"):
-        normalized = rewrite_s3_to_s3a(data_dir)
-        spark.conf.set(LIBPOSTAL_DATA_DIR_CONF, normalized)
-        spark.sparkContext.addFile(normalized, recursive=True)
 
 
 def bind_jvm_text_functions() -> TextFunctions:
