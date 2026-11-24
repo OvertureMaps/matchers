@@ -6,7 +6,9 @@
 
 On top of the required params, `input` and `baseline` each need a `place` entry, and `modelJar` is required.
 
-The job adds the GraphFrames package to the Spark session, and sets the Spark checkpoint directory to `checkpoints/` in the run folder, which GraphFrames connected components needs.
+The job needs GraphFrames on the Spark session. A local run adds it from the Maven coordinates in `job.PACKAGES`. A run on a managed platform does not, so the job's deployment has to supply the package.
+
+The job sets the Spark checkpoint directory to `checkpoints/` in the run folder, which GraphFrames connected components needs.
 
 ## Stages
 
