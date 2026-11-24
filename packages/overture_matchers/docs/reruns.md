@@ -21,13 +21,13 @@ flowchart LR
 
 Each marker is written only after all of the stage's outputs. Interrupted stages lack markers, so they rerun and overwrite their partial outputs.
 
-Stages always hand the next stage a read of their outputs from the folder, whether the stages ran or were skipped. Resumed runs therefore see the same data as uninterrupted runs.
+Each stage passes its outputs to the next stage, whether the stage ran or was skipped. Resumed runs therefore see the same data as uninterrupted runs.
 
 Each feature type has its own marker. Jobs can match several feature types in one folder, and each feature type resumes independently.
 
 ## Changed params
 
-Skipped stages keep the outputs produced with the earlier run's params. Mixing those outputs with stages run under different params gives results that no single set of params describes.
+Skipped stages keep the outputs from the earlier run. Rerunning with changed params would combine those outputs with stages run under the new params, so the final result would match neither set of params.
 
 > [!WARNING]
 > After the first stage finishes, reruns fail if the params changed. Start a new run folder instead.
