@@ -6,9 +6,11 @@ import math
 import struct
 
 import pytest
+from pyspark import StorageLevel
 from pyspark.sql import functions as F
 
 from overture_matchers.core.stages import RawInputs
+from overture_matchers.places import job as places_job
 from overture_matchers.places import prepare
 from overture_matchers.places.job import SetupOutput, setup
 from overture_matchers.places.prepare import (
@@ -352,3 +354,51 @@ def test_prepare_sides_add_their_extra_columns(spark, monkeypatch):
     retired = raw.withColumn("corpus_state", F.lit("retired"))
     assert prepare_baseline(retired, F.lit("b"), _STAND_INS).first().active == 0
     assert prepare_baseline(raw, F.lit("b"), _STAND_INS).first().active == 1
+
+
+def test_setup_wires_history_caching_and_resolution_without_private_artifacts(
+    spark, monkeypatch
+):
+    components = _components(("house_number", "781"), ("road", "franklin ave"))
+    monkeypatch.setattr(prepare, "_parse_first_address", lambda: components)
+    monkeypatch.setattr(places_job, "ship_libpostal_data_to_workers", lambda _s: None)
+    monkeypatch.setattr(places_job, "register_text_udfs", lambda _s: None)
+    monkeypatch.setattr(places_job, "bind_jvm_text_functions", lambda: _STAND_INS)
+
+    candidates = _raw_place(spark)
+    baseline = candidates.withColumn("id", F.lit("b1")).withColumn(
+        "corpus_state", F.lit("retired")
+    )
+    raw = RawInputs(candidates, baseline)
+    expected_keys = [_reference_quadkey(40.7128, -74.006, 12)]
+
+    with_history = setup(
+        raw,
+        "acme",
+        baseline_provider="acme",
+        match_history=True,
+        blocking_resolution=12,
+    )
+    try:
+        assert with_history.baseline.storageLevel == StorageLevel.MEMORY_AND_DISK
+        cand_row = with_history.candidates.first()
+        base_row = with_history.baseline.first()
+        assert (cand_row.provider, base_row.provider) == ("acme", "acme")
+        assert (cand_row.blocking_keys, base_row.blocking_keys) == (
+            expected_keys,
+            expected_keys,
+        )
+        assert cand_row.base_ids == ["b1"]
+        assert base_row.active == 0
+    finally:
+        with_history.baseline.unpersist()
+
+    without_history = setup(
+        raw,
+        "acme",
+        baseline_provider="acme",
+        match_history=False,
+        blocking_resolution=12,
+    )
+    assert not without_history.baseline.is_cached
+    assert without_history.candidates.first().base_ids is None
