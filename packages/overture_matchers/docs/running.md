@@ -37,6 +37,19 @@ The output folder names match the Scala matchers' layout. Each job's page lists 
 
 A rerun on the same folder skips every stage that has a marker and reads that stage's outputs instead. A marker is written only after all of its stage's outputs, so an interrupted stage runs again. Each feature type has its own marker.
 
+```mermaid
+%%{init: {"theme": "dark", "flowchart": {"padding": 14}, "themeVariables": {"fontSize": "14px", "fontFamily": "Montserrat, Arial, sans-serif", "mainBkg": "#001A39", "nodeBorder": "#0EC1BD", "lineColor": "#4051CC", "primaryTextColor": "#FFFFFF", "edgeLabelBackground": "#001A39"}}}%%
+flowchart LR
+    classDef default rx:8,ry:8,stroke-width:0.75px
+    Q{Stage marker exists?}
+    Q -->|no| R[Run the stage]
+    R --> W[Write its outputs]
+    W --> K[Write the marker]
+    K --> D[Read the outputs]
+    Q -->|yes| D
+    D --> N[Next stage]
+```
+
 > [!WARNING]
 > A rerun with changed params fails once any stage has finished, because the finished stages ran with the old params. Start a new run folder instead.
 

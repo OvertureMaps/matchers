@@ -10,7 +10,17 @@ The job adds the GraphFrames package to the Spark session, and sets the Spark ch
 
 ## Stages
 
-The stages run in order, and each reads the outputs of the ones before it.
+The stages run in order. Each stage's outputs feed the next one, and later stages also read the outputs of the earlier ones.
+
+```mermaid
+%%{init: {"theme": "dark", "flowchart": {"padding": 14}, "themeVariables": {"fontSize": "14px", "fontFamily": "Montserrat, Arial, sans-serif", "mainBkg": "#001A39", "nodeBorder": "#0EC1BD", "lineColor": "#4051CC", "primaryTextColor": "#FFFFFF", "edgeLabelBackground": "#001A39"}}}%%
+flowchart LR
+    classDef default rx:8,ry:8,stroke-width:0.75px
+    I[input and baseline] --> S[setup]
+    S -->|candidates, baseline| M[matching]
+    M -->|matches| A[assign_ids]
+    A -->|final, fallout| X[metrics]
+```
 
 | Stage | Does | Outputs |
 | --- | --- | --- |
