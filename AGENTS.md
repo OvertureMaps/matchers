@@ -1,6 +1,38 @@
 # AGENTS.md
 
-Instructions for AI agents working in this repository. Setup, tests and lint are in [CONTRIBUTING.md](.github/CONTRIBUTING.md); this file covers only what keeps the docs correct.
+Instructions for AI agents working in this repository.
+
+## Repository
+
+This repository is the Python port of Overture's Scala matchers, which assign GERS IDs by matching incoming records against the Overture baseline. The port's design, structure and sequencing are in [docs/python-migration.md](docs/python-migration.md). Read it before porting a stage or adding a theme.
+
+| Path | Holds |
+| --- | --- |
+| `packages/overture_matchers` | The published package: `core` is the run plumbing every theme shares, and each theme has its own subpackage with a `job` module. |
+| `parity` | A harness that compares two matcher runs on the same input. |
+| `docs` | Repo-wide docs: the port design and package versioning. |
+
+Each directory under `packages/` is an independent package with its own `uv.lock`. The repo root is not a package: its `pyproject.toml` pins ruff and holds the lint rules every package extends.
+
+## Commands
+
+Tests need Java 17 for the local Spark session. The first test run downloads about 750 MB of jars. Full setup is in [CONTRIBUTING.md](.github/CONTRIBUTING.md).
+
+```sh
+uv sync                                        # root: ruff
+cd packages/overture_matchers && uv sync       # package: pytest, pyspark, sedona
+uv run pytest                                  # from packages/overture_matchers
+uv run ruff check . && uv run ruff format --check .   # from the repo root
+```
+
+## Conventions
+
+- Name functions verbosely, with a clear verb. A function's name is never shorter or vaguer than its Scala counterpart.
+- Keep the Scala matchers' names for job params and output folders, so a Python run and a Scala run stay comparable.
+- Start every Python file with the SPDX license and copyright header the existing files carry.
+- Leave the `pyspark` and `apache-sedona` pins alone unless the production Spark runtime changes. They match it on purpose.
+- Add tests in the package's `tests/` directory. They share one local Sedona session through the `spark` fixture.
+- Title a pull request with a Conventional Commits type, such as `fix:` or `docs:`. Merging to `main` releases every package whose shipped files changed, and the type sets the version bump. See [PACKAGE_VERSIONING.md](docs/PACKAGE_VERSIONING.md).
 
 ## Update the docs in the same change
 
