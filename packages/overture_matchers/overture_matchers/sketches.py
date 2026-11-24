@@ -69,7 +69,7 @@ class CountMinSketch:
         if version != 1:
             raise ValueError(f"unsupported CountMinSketch version {version}")
         self._data = data
-        # The table stays packed, like the Bloom filter's bitset.
+        # The table stays packed. Unpacking it into Python ints costs several times the memory.
         self._table_start = struct.calcsize(">iqii") + 8 * self._depth
 
     def estimate_count(self, value: str) -> int:

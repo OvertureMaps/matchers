@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sys
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 from overture_spark.job import SparkSedonaJob
 from pyspark import StorageLevel
@@ -17,7 +18,7 @@ from pyspark.sql import functions as F
 
 from overture_matchers import ids
 from overture_matchers.core import io
-from overture_matchers.core.config import RunConfig
+from overture_matchers.core.config import RunConfig, rewrite_s3_to_s3a
 from overture_matchers.core.libpostal import ship_libpostal_data_to_workers
 from overture_matchers.core.local import run_local
 from overture_matchers.core.stages import (
@@ -119,14 +120,15 @@ def matching(
 
     Args:
         prepared: Output of ``setup``.
-        model_jar: Path of the ``places-matcher-model`` jar. It is shipped to
-            the workers here, because a resumed run skips ``setup``.
+        model_jar: Path or URI of the ``places-matcher-model`` jar, shipped to
+            Python workers for the booster and name sketch.
         output_path: Run directory that receives the ``blocking`` checkpoint.
     """
     spark = prepared.candidates.sparkSession
-    spark.sparkContext.addFile(model_jar)
-    model = PlacesModel.load(spark, model_jar)
-    jar_name = os.path.basename(model_jar)
+    normalized_jar = rewrite_s3_to_s3a(model_jar)
+    spark.sparkContext.addFile(normalized_jar)
+    model = PlacesModel.load(spark, normalized_jar)
+    jar_name = os.path.basename(urlparse(normalized_jar).path)
     candidates_to_block = prepared.candidates.filter(F.col("base_ids").isNull()).drop(
         "base_ids"
     )

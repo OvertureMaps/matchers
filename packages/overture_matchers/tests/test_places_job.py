@@ -43,7 +43,18 @@ def params(spark, tmp_path):
 
 
 @pytest.fixture
-def stub_stages(spark, monkeypatch):
+def restore_spatial_join_conf(spark):
+    saved = {key: spark.conf.get(key, None) for key in SPATIAL_JOIN_CONF}
+    yield
+    for key, value in saved.items():
+        if value is None:
+            spark.conf.unset(key)
+        else:
+            spark.conf.set(key, value)
+
+
+@pytest.fixture
+def stub_stages(spark, monkeypatch, restore_spatial_join_conf):
     def setup(
         raw,
         provider,
@@ -58,13 +69,6 @@ def stub_stages(spark, monkeypatch):
 
     monkeypatch.setattr(job, "setup", setup)
     monkeypatch.setattr(job, "matching", matching)
-    saved = {key: spark.conf.get(key, None) for key in SPATIAL_JOIN_CONF}
-    yield
-    for key, value in saved.items():
-        if value is None:
-            spark.conf.unset(key)
-        else:
-            spark.conf.set(key, value)
 
 
 def test_job_writes_config_then_stops_at_first_stub(
@@ -93,7 +97,9 @@ def test_run_rejects_a_missing_model_jar(spark, params):
         job.run(spark, job.RunConfig.from_params(params))
 
 
-def test_run_chains_stage_outputs_and_skips_on_rerun(spark, params, monkeypatch):
+def test_run_chains_stage_outputs_and_skips_on_rerun(
+    spark, params, monkeypatch, restore_spatial_join_conf
+):
     calls = {}
 
     def setup(
@@ -110,6 +116,7 @@ def test_run_chains_stage_outputs_and_skips_on_rerun(spark, params, monkeypatch)
         calls["matching"] = (
             prepared.candidates.count(),
             prepared.baseline.count(),
+            model_jar,
             output_path,
         )
         return MatchingOutput(spark.range(5))
@@ -142,7 +149,7 @@ def test_run_chains_stage_outputs_and_skips_on_rerun(spark, params, monkeypatch)
     run = params["outputPath"]
     assert calls == {
         "setup": (2, False, 14),
-        "matching": (3, 4, run),
+        "matching": (3, 4, config.model_jar, run),
         "assign_ids": (5, config.provider, run),
         "metrics": (6, 7, {"loaded": True}),
     }
