@@ -75,13 +75,13 @@ def spark():
 
 @pytest.fixture
 def graph_session(spark, tmp_path):
-    """``spark`` ready for ``connected_components``, with its settings restored after."""
+    """``spark`` ready for ``compute_connected_components``, restored afterwards."""
     spark.sparkContext.setCheckpointDir(str(tmp_path / "checkpoints"))
-    before = {k: spark.conf.get(k, None) for k in CONNECTED_COMPONENTS_CONF}
+    saved_conf = {key: spark.conf.get(key, None) for key in CONNECTED_COMPONENTS_CONF}
     for key, value in CONNECTED_COMPONENTS_CONF.items():
         spark.conf.set(key, value)
     yield spark
-    for key, value in before.items():
+    for key, value in saved_conf.items():
         if value is None:
             spark.conf.unset(key)
         else:

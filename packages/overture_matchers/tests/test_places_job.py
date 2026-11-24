@@ -80,7 +80,7 @@ def test_job_writes_config_then_stops_at_first_stub(
     assert isinstance(result.exception, NotImplementedError)
     assert (tmp_path / "run" / "config.json").is_file()
     assert "/run/checkpoints/" in spark.sparkContext.getCheckpointDir()
-    assert {k: spark.conf.get(k) for k in job.JOB_CONF} == job.JOB_CONF
+    assert {key: spark.conf.get(key) for key in job.JOB_CONF} == job.JOB_CONF
     assert "matching" in str(result.exception)
     assert not (tmp_path / "run" / "_completed_stages" / "matching").exists()
 

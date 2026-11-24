@@ -19,7 +19,7 @@ NO_MATCH = "nomatch"
 BASELINE_BASELINE = f"{BASELINE}_{BASELINE}"
 CANDIDATE_CANDIDATE = f"{CANDIDATE}_{CANDIDATE}"
 CANDIDATE_BASELINE = f"{CANDIDATE}_{BASELINE}"
-MATCH_COLUMNS = (
+MATCH_RESULT_COLUMNS = (
     "id",
     "provider",
     "record_type",
@@ -32,18 +32,18 @@ MATCH_COLUMNS = (
     "match_sub_type",
     "base_active",
 )
-# Session settings ``connected_components`` needs. GraphFrames 0.8.3 on Spark
-# 3.5 drops edges under adaptive execution (graphframes/graphframes#453), and
-# Sedona 1.8.1's shaded GraphFrames 0.10.0 falls back to slow RDD checkpoints
-# unless local checkpoints are enabled.
+# Session settings ``compute_connected_components`` needs. GraphFrames 0.8.3 on
+# Spark 3.5 drops edges under adaptive execution (graphframes/graphframes#453),
+# and Sedona 1.8.1's shaded GraphFrames 0.10.0 falls back to slow RDD
+# checkpoints unless local checkpoints are enabled.
 CONNECTED_COMPONENTS_CONF = {
     "spark.sql.adaptive.enabled": "false",
     "spark.graphframes.useLocalCheckpoints": "true",
 }
 
 
-def connected_components(edges: DataFrame) -> DataFrame:
-    """The connected component of every vertex in ``edges``.
+def compute_connected_components(edges: DataFrame) -> DataFrame:
+    """Compute the connected component of every vertex in ``edges``.
 
     Runs the GraphFrames JVM class through py4j, so only the GraphFrames jar
     has to be on the classpath, and Spark Connect is not supported. The
