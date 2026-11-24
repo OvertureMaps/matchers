@@ -111,7 +111,7 @@ FEATURE_INPUTS = {
 }
 
 
-def phone_last_digits_match() -> Column:
+def calculate_phone_last_digits_match() -> Column:
     """1.0 if the last four phone digits match, else 0.0. Null when either phone is missing."""
     left, right = F.col("normalized_phone"), F.col("base_normalized_phone")
     missing = left.isNull() | right.isNull() | (left == "") | (right == "")
@@ -120,7 +120,7 @@ def phone_last_digits_match() -> Column:
     )
 
 
-def website_domain_match() -> Column:
+def calculate_website_domain_match() -> Column:
     """1 if the two sides share a website domain, 0 if not, -1 if either has none."""
     left, right = F.col("website_domains"), F.col("base_website_domains")
     missing = (
@@ -133,7 +133,7 @@ def website_domain_match() -> Column:
     )
 
 
-def geo_distance() -> Column:
+def calculate_geo_distance() -> Column:
     """Great-circle distance between the two places in meters."""
     return F.expr(
         "ST_DistanceSphere(ST_Point(longitude, latitude), "
@@ -141,21 +141,32 @@ def geo_distance() -> Column:
     )
 
 
+def calculate_unique_name_h3_cell_count_bin(
+    compute_unique_name_bin: Callable[[Column, Column, Column], Column],
+) -> Column:
+    """Larger H3 resolution-5 name-repetition bin (0, 1 or 2) across the two places."""
+    left_bin = compute_unique_name_bin(
+        F.col("name"), F.col("latitude"), F.col("longitude")
+    )
+    right_bin = compute_unique_name_bin(
+        F.col("base_name"), F.col("base_latitude"), F.col("base_longitude")
+    )
+    return F.greatest(left_bin, right_bin).cast("double")
+
+
 SCORING_EXPRESSIONS = {
     "phone_number_similarity_availability": calculate_phone_number_similarity_availability,
     "house_number_similarity_availability": calculate_house_number_similarity_availability,
-    "phone_last_digits_match": phone_last_digits_match,
-    "website_domain_match": website_domain_match,
-    GEO_DISTANCE: geo_distance,
+    "phone_last_digits_match": calculate_phone_last_digits_match,
+    "website_domain_match": calculate_website_domain_match,
+    GEO_DISTANCE: calculate_geo_distance,
 }
 
+UNIQUE_NAME_H3_CELL_COUNT_BIN = "unique_name_h3_cell_count_bin"
 # Columns scoring adds to each side before the pairwise UDF runs.
-NAME_H3_CELL = "name_h3_cell"
-NAME_H3_RESOLUTION = 5
 NAME_VECTOR = "name_vector"
 TAXONOMY_VECTOR = "taxonomy_vector"
 PAIRWISE_INPUTS = (
-    "name",
     "name_clean",
     "name_clean_tokens",
     "name_clean_stripped",
@@ -163,12 +174,11 @@ PAIRWISE_INPUTS = (
     "address_clean",
     "address_clean_tokens",
     "website_urls",
-    NAME_H3_CELL,
     NAME_VECTOR,
     TAXONOMY_VECTOR,
 )
-NAME_COSINE = "name_cosine_similarity"
-TAXONOMY_COSINE = "taxonomy_cosine_similarity"
+NAME_COSINE_SIMILARITY = "name_cosine_similarity"
+TAXONOMY_COSINE_SIMILARITY = "taxonomy_cosine_similarity"
 PAIRWISE_FEATURES = StructType(
     [
         StructField(
@@ -197,139 +207,160 @@ PAIRWISE_FEATURES = StructType(
             "address_tfidf",
             "name_tfidf_stripped",
             "residual_idf_max_stripped",
-            "unique_name_h3_cell_count_bin",
-            NAME_COSINE,
-            TAXONOMY_COSINE,
+            NAME_COSINE_SIMILARITY,
+            TAXONOMY_COSINE_SIMILARITY,
         )
     ]
 )
-SCORING_FEATURES = {*SCORING_EXPRESSIONS, *PAIRWISE_FEATURES.fieldNames()}
+SCORING_FEATURES = {
+    *SCORING_EXPRESSIONS,
+    UNIQUE_NAME_H3_CELL_COUNT_BIN,
+    *PAIRWISE_FEATURES.fieldNames(),
+}
 
 
 class PairwiseLookups(NamedTuple):
-    """Token weights and name counts the pairwise features read.
+    """Token weights the pairwise features read.
 
     Attributes:
-        name_idf: IDF of a name token.
-        address_idf: IDF of an address token.
-        name_repeated: Whether an H3 name key occurs at least twice.
-        name_common: Whether an H3 name key occurs at least ten times.
+        compute_name_idf: IDF of a name token.
+        compute_address_idf: IDF of an address token.
     """
 
-    name_idf: Callable[[str], float]
-    address_idf: Callable[[str], float]
-    name_repeated: Callable[[str], bool]
-    name_common: Callable[[str], bool]
+    compute_name_idf: Callable[[str], float]
+    compute_address_idf: Callable[[str], float]
 
 
-# Java's String.trim strips every character up to and including the space.
-_JAVA_WHITESPACE = "".join(map(chr, range(33)))
 _INT8_SCALE = 1.0 / (127.0 * 127.0)
 
 
-def _name_h3_bin(name: str | None, cell: int | None, lookups: PairwiseLookups) -> int:
-    """2 if the name is common in its H3 cell, 1 if it repeats there, else 0."""
-    if name is None or cell is None:
-        return 0
-    name_key = name.strip(_JAVA_WHITESPACE).lower()
-    if not name_key:
-        return 0
-    key = f"{NAME_H3_RESOLUTION}:{cell}:{name_key}"
-    if lookups.name_common(key):
-        return 2
-    return 1 if lookups.name_repeated(key) else 0
-
-
-def _cosine(left: bytes | None, right: bytes | None) -> float | None:
+def _compute_cosine_similarity(
+    left_vector: bytes | None, right_vector: bytes | None
+) -> float | None:
     """Cosine of two int8 embeddings scaled to unit length.
 
     None if either is missing or the lengths differ.
     """
-    if not left or not right or len(left) != len(right):
+    if not left_vector or not right_vector or len(left_vector) != len(right_vector):
         return None
     dot = int(
         np.dot(
-            np.frombuffer(left, np.int8).astype(np.int32),
-            np.frombuffer(right, np.int8).astype(np.int32),
+            np.frombuffer(left_vector, np.int8).astype(np.int32),
+            np.frombuffer(right_vector, np.int8).astype(np.int32),
         )
     )
     return min(1.0, max(-1.0, dot * _INT8_SCALE))
 
 
-def _pairwise(p: Row, lookups: PairwiseLookups) -> dict:
-    """Every ``PAIRWISE_FEATURES`` value of the pair ``p``."""
-    name_idf, address_idf = lookups.name_idf, lookups.address_idf
-    s = similarity
-    name_similarity = s.normalized_similarity(p.name_clean, p.base_name_clean)
-    # Name features marked strict count only where the full names differ.
-    strict = 1.0 - name_similarity
-    names, base_names = p.name_clean_tokens, p.base_name_clean_tokens
-    stripped, base_stripped = (
-        p.name_clean_stripped_tokens,
-        p.base_name_clean_stripped_tokens,
+def _compute_pairwise_features_for_row(pair_row: Row, lookups: PairwiseLookups) -> dict:
+    """Every ``PAIRWISE_FEATURES`` value of ``pair_row``."""
+    compute_name_idf = lookups.compute_name_idf
+    compute_address_idf = lookups.compute_address_idf
+    name_similarity = similarity.compute_normalized_similarity(
+        pair_row.name_clean, pair_row.base_name_clean
     )
-    addresses, base_addresses = p.address_clean_tokens, p.base_address_clean_tokens
-    has_addresses = bool(p.address_clean) and bool(p.base_address_clean)
+    # Name features marked strict count only where the full names differ.
+    strict_weight = 1.0 - name_similarity
+    names, base_names = pair_row.name_clean_tokens, pair_row.base_name_clean_tokens
+    stripped, base_stripped = (
+        pair_row.name_clean_stripped_tokens,
+        pair_row.base_name_clean_stripped_tokens,
+    )
+    addresses, base_addresses = (
+        pair_row.address_clean_tokens,
+        pair_row.base_address_clean_tokens,
+    )
+    has_addresses = bool(pair_row.address_clean) and bool(pair_row.base_address_clean)
     return {
         "name_similarity": name_similarity,
-        "name_jaccard_similarity": s.fuzzy_jaccard(names, base_names),
-        "name_strict_prefix_score": s.prefix_score(p.name_clean, p.base_name_clean)
-        * strict,
-        "name_strict_suffix_score": s.suffix_score(p.name_clean, p.base_name_clean)
-        * strict,
-        "name_strict_shared_token_ratio": s.shared_token_ratio(names, base_names)
-        * strict,
-        "name_strict_token_subset": s.is_token_subset(names, base_names) * strict,
-        "address_similarity_availability": s.normalized_similarity(
-            p.address_clean, p.base_address_clean
+        "name_jaccard_similarity": similarity.compute_fuzzy_jaccard_similarity(
+            names, base_names
+        ),
+        "name_strict_prefix_score": similarity.get_string_prefix_score(
+            pair_row.name_clean, pair_row.base_name_clean
+        )
+        * strict_weight,
+        "name_strict_suffix_score": similarity.get_string_suffix_score(
+            pair_row.name_clean, pair_row.base_name_clean
+        )
+        * strict_weight,
+        "name_strict_shared_token_ratio": similarity.compute_shared_token_ratio(
+            names, base_names
+        )
+        * strict_weight,
+        "name_strict_token_subset": similarity.is_token_subset(names, base_names)
+        * strict_weight,
+        "address_similarity_availability": similarity.compute_normalized_similarity(
+            pair_row.address_clean, pair_row.base_address_clean
         )
         if has_addresses
         else -1.0,
-        "address_prefix_score": s.prefix_score(p.address_clean, p.base_address_clean),
-        "address_suffix_score": s.suffix_score(p.address_clean, p.base_address_clean),
-        "address_jaccard_similarity": s.fuzzy_jaccard(addresses, base_addresses),
-        "address_shared_token_ratio": s.shared_token_ratio(addresses, base_addresses),
-        "address_token_subset": int(s.is_token_subset(addresses, base_addresses)),
-        "name_similarity_stripped": s.normalized_similarity(
-            p.name_clean_stripped, p.base_name_clean_stripped
+        "address_prefix_score": similarity.get_string_prefix_score(
+            pair_row.address_clean, pair_row.base_address_clean
         ),
-        "name_jaccard_similarity_stripped": s.fuzzy_jaccard(stripped, base_stripped),
-        "name_prefix_score_stripped": s.prefix_score(
-            p.name_clean_stripped, p.base_name_clean_stripped
+        "address_suffix_score": similarity.get_string_suffix_score(
+            pair_row.address_clean, pair_row.base_address_clean
         ),
-        "name_suffix_score_stripped": s.suffix_score(
-            p.name_clean_stripped, p.base_name_clean_stripped
+        "address_jaccard_similarity": similarity.compute_fuzzy_jaccard_similarity(
+            addresses, base_addresses
         ),
-        "website_path_similarity": s.website_path_similarity(
-            p.website_urls, p.base_website_urls
+        "address_shared_token_ratio": similarity.compute_shared_token_ratio(
+            addresses, base_addresses
         ),
-        "name_tfidf": s.tfidf_overlap(names, base_names, name_idf),
-        "residual_idf_max": s.residual_idf_max(names, base_names, name_idf),
-        "address_tfidf": s.tfidf_overlap(addresses, base_addresses, address_idf),
-        "name_tfidf_stripped": s.tfidf_overlap(stripped, base_stripped, name_idf),
-        "residual_idf_max_stripped": s.residual_idf_max(
-            stripped, base_stripped, name_idf
+        "address_token_subset": int(
+            similarity.is_token_subset(addresses, base_addresses)
         ),
-        "unique_name_h3_cell_count_bin": float(
-            max(
-                _name_h3_bin(p.name, p.name_h3_cell, lookups),
-                _name_h3_bin(p.base_name, p.base_name_h3_cell, lookups),
-            )
+        "name_similarity_stripped": similarity.compute_normalized_similarity(
+            pair_row.name_clean_stripped, pair_row.base_name_clean_stripped
         ),
-        NAME_COSINE: _cosine(p.name_vector, p.base_name_vector),
-        TAXONOMY_COSINE: _cosine(p.taxonomy_vector, p.base_taxonomy_vector),
+        "name_jaccard_similarity_stripped": similarity.compute_fuzzy_jaccard_similarity(
+            stripped, base_stripped
+        ),
+        "name_prefix_score_stripped": similarity.get_string_prefix_score(
+            pair_row.name_clean_stripped, pair_row.base_name_clean_stripped
+        ),
+        "name_suffix_score_stripped": similarity.get_string_suffix_score(
+            pair_row.name_clean_stripped, pair_row.base_name_clean_stripped
+        ),
+        "website_path_similarity": similarity.compute_website_path_similarity(
+            pair_row.website_urls, pair_row.base_website_urls
+        ),
+        "name_tfidf": similarity.get_tfidf_overlap(names, base_names, compute_name_idf),
+        "residual_idf_max": similarity.compute_residual_idf_max(
+            names, base_names, compute_name_idf
+        ),
+        "address_tfidf": similarity.get_tfidf_overlap(
+            addresses, base_addresses, compute_address_idf
+        ),
+        "name_tfidf_stripped": similarity.get_tfidf_overlap(
+            stripped, base_stripped, compute_name_idf
+        ),
+        "residual_idf_max_stripped": similarity.compute_residual_idf_max(
+            stripped, base_stripped, compute_name_idf
+        ),
+        NAME_COSINE_SIMILARITY: _compute_cosine_similarity(
+            pair_row.name_vector, pair_row.base_name_vector
+        ),
+        TAXONOMY_COSINE_SIMILARITY: _compute_cosine_similarity(
+            pair_row.taxonomy_vector, pair_row.base_taxonomy_vector
+        ),
     }
 
 
-def pairwise_features(lookups: Callable[[], PairwiseLookups]) -> Column:
+def compute_pairwise_features(get_lookups: Callable[[], PairwiseLookups]) -> Column:
     """Struct of every ``PAIRWISE_FEATURES`` field, from one Python UDF call per pair.
 
     Reads ``PAIRWISE_INPUTS`` on both sides.
 
     Args:
-        lookups: Builds the lookups. It runs on the workers, once per pair,
+        get_lookups: Builds the lookups. It runs on the workers, once per pair,
             so it should cache what it builds.
     """
-    inputs = F.struct(*PAIRWISE_INPUTS, *[f"base_{c}" for c in PAIRWISE_INPUTS])
-    udf = F.udf(lambda p: _pairwise(p, lookups()), PAIRWISE_FEATURES)
+    inputs = F.struct(
+        *PAIRWISE_INPUTS, *[f"base_{column_name}" for column_name in PAIRWISE_INPUTS]
+    )
+    udf = F.udf(
+        lambda pair_row: _compute_pairwise_features_for_row(pair_row, get_lookups()),
+        PAIRWISE_FEATURES,
+    )
     return udf(inputs)

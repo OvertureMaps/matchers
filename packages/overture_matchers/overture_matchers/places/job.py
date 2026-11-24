@@ -36,22 +36,25 @@ from overture_matchers.metrics import (
     build_metrics_dataframe,
     compute_metrics,
 )
+from overture_matchers.places import features
 from overture_matchers.places.blocking import (
     SPATIAL_JOIN_CONF,
-    by_pair_key,
     get_blocking_pairs,
-    shuffle_partition_count,
+    get_shuffle_partition_count,
+    repartition_by_pair_key,
 )
 from overture_matchers.places.metric_inputs import load_optional_metric_inputs
 from overture_matchers.places.metrics import METRICS
 from overture_matchers.places.model import (
     BLOCKING_BOOSTER_RESOURCE,
     SCORING_BOOSTER_RESOURCE,
+    UNIQUE_NAME_H3_BIN_GE2_RESOURCE,
+    UNIQUE_NAME_H3_BIN_GE10_RESOURCE,
     PlacesModel,
+    bind_margin_and_probability_udf,
     bind_match_probability_udf,
     bind_name_idf_udf,
-    margin_and_probability_udf,
-    scoring_lookups,
+    load_scoring_lookups,
 )
 from overture_matchers.places.model_jar import CONFIG_RESOURCE, open_model_jar
 from overture_matchers.places.prepare import (
@@ -63,9 +66,15 @@ from overture_matchers.places.prepare import (
 )
 from overture_matchers.places.runtime import (
     bind_jvm_text_functions,
+    bind_unique_name_h3_bin_udf,
     register_text_udfs,
+    register_unique_name_h3_bin_udf,
 )
-from overture_matchers.places.scoring import MISSING_CACHE, Scorer, score_pairs
+from overture_matchers.places.scoring import (
+    MISSING_EMBEDDINGS_CACHE_MESSAGE,
+    PlacesPairScorer,
+    score_pairs,
+)
 from overture_matchers.places.selection import select_cluster_winners_and_fallout
 
 if TYPE_CHECKING:
@@ -125,33 +134,36 @@ def setup(
     return SetupOutput(candidates, baseline)
 
 
-def shipped_name(model_jar: str) -> str:
+def get_shipped_jar_name(model_jar: str) -> str:
     """The name workers find ``model_jar`` under once it is shipped."""
     return os.path.basename(urlparse(model_jar).path.rstrip("/"))
 
 
-def jar_scorer(config: dict, jar_name: str) -> Scorer:
+def build_places_pair_scorer(config: dict, jar_name: str) -> PlacesPairScorer:
     """The scorer of the jar's parsed scoring ``config``, reading the shipped jar."""
-    return Scorer.from_config(
+    return PlacesPairScorer.from_config(
         config,
-        lookups=partial(scoring_lookups, jar_name),
-        predict=margin_and_probability_udf(jar_name, SCORING_BOOSTER_RESOURCE),
+        get_lookups=partial(load_scoring_lookups, jar_name),
+        compute_unique_name_bin=bind_unique_name_h3_bin_udf(),
+        predict_scores=bind_margin_and_probability_udf(
+            jar_name, SCORING_BOOSTER_RESOURCE
+        ),
     )
 
 
-def embeddings_cache(
-    spark: SparkSession, scorer: Scorer, table: str | None
+def load_embeddings_cache(
+    spark: SparkSession, scorer: PlacesPairScorer, table_name: str | None
 ) -> DataFrame | None:
-    """The embeddings cache ``table`` if ``scorer`` reads it, else None.
+    """The embeddings cache ``table_name`` if ``scorer`` reads it, else None.
 
     Raises:
-        ValueError: The scorer reads the cache, but ``table`` is None.
+        ValueError: The scorer reads the cache, but ``table_name`` is None.
     """
     if not scorer.needs_embeddings:
         return None
-    if table is None:
-        raise ValueError(MISSING_CACHE)
-    return spark.table(table)
+    if table_name is None:
+        raise ValueError(MISSING_EMBEDDINGS_CACHE_MESSAGE)
+    return spark.table(table_name)
 
 
 def matching(
@@ -165,7 +177,7 @@ def matching(
     Args:
         prepared: Output of ``setup``.
         model_jar: Path or URI of the ``places-matcher-model`` jar, shipped to
-            Python workers for the boosters, sketches and filters.
+            Python workers for the boosters and sketches.
         output_path: Run directory that receives the ``blocking`` and
             ``scores`` checkpoints.
         embeddings_cache_table: Table of name and taxonomy embeddings. It is
@@ -174,11 +186,19 @@ def matching(
     spark = prepared.candidates.sparkSession
     normalized_jar = rewrite_s3_to_s3a(model_jar)
     spark.sparkContext.addFile(normalized_jar)
-    jar_name = shipped_name(normalized_jar)
+    jar_name = get_shipped_jar_name(normalized_jar)
     with open_model_jar(spark, normalized_jar) as jar:
-        model = PlacesModel.from_jar(jar)
-        scorer = jar_scorer(json.loads(jar.read(CONFIG_RESOURCE)), jar_name)
-    embeddings = embeddings_cache(spark, scorer, embeddings_cache_table)
+        model = PlacesModel.load_from_jar(jar)
+        scorer = build_places_pair_scorer(
+            json.loads(jar.read(CONFIG_RESOURCE)), jar_name
+        )
+        if features.UNIQUE_NAME_H3_CELL_COUNT_BIN in scorer.feature_order:
+            register_unique_name_h3_bin_udf(
+                spark,
+                jar.read(UNIQUE_NAME_H3_BIN_GE2_RESOURCE),
+                jar.read(UNIQUE_NAME_H3_BIN_GE10_RESOURCE),
+            )
+    embeddings_cache = load_embeddings_cache(spark, scorer, embeddings_cache_table)
     candidates_to_block = prepared.candidates.filter(F.col("base_ids").isNull()).drop(
         "base_ids"
     )
@@ -195,9 +215,9 @@ def matching(
         FEATURE_TYPE,
     )
     scores = io.checkpoint(
-        by_pair_key(
-            score_pairs(blocked_pairs, scorer, embeddings),
-            shuffle_partition_count(spark),
+        repartition_by_pair_key(
+            score_pairs(blocked_pairs, scorer, embeddings_cache),
+            get_shuffle_partition_count(spark),
         ),
         output_path,
         "scores",

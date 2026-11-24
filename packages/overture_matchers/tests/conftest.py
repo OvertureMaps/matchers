@@ -82,11 +82,11 @@ CONFIG = {
 }
 
 
-def train_booster(x, y):
+def train_xgboost_booster(feature_matrix, labels):
     """A tiny binary booster saved as JSON."""
     booster = xgboost.train(
         {"objective": "binary:logistic", "max_depth": 2},
-        xgboost.DMatrix(x, label=y),
+        xgboost.DMatrix(feature_matrix, label=labels),
         num_boost_round=10,
     )
     return bytes(booster.save_raw(raw_format="json"))
@@ -96,10 +96,12 @@ def train_booster(x, y):
 def jar(spark, tmp_path_factory):
     """A jar holding a blocking booster that keeps pairs with similar names."""
     rng = np.random.default_rng(0)
-    x = rng.random((400, 3)) * [2.0, 1.0, 400.0]
-    booster = train_booster(x, (x[:, 1] > 0.5).astype(int))
+    feature_matrix = rng.random((400, 3)) * [2.0, 1.0, 400.0]
+    booster = train_xgboost_booster(
+        feature_matrix, (feature_matrix[:, 1] > 0.5).astype(int)
+    )
     words = spark.createDataFrame(
-        [(w,) for w, n in SKETCH.items() for _ in range(n)], ["word"]
+        [(word,) for word, count in SKETCH.items() for _ in range(count)], ["word"]
     )
     sketch = words._jdf.stat().countMinSketch("word", 5, 1000, 1)
     cms = pa.table(
@@ -108,11 +110,11 @@ def jar(spark, tmp_path_factory):
     out = io.BytesIO()
     pq.write_table(cms, out)
     path = tmp_path_factory.mktemp("jar") / "tiny-model.jar"
-    with zipfile.ZipFile(path, "w") as z:
-        z.writestr(
+    with zipfile.ZipFile(path, "w") as jar_file:
+        jar_file.writestr(
             "places_matcher_model/metadata/blocking_config",
             json.dumps(CONFIG),
         )
-        z.writestr("places_matcher_model/data/blocking_model", booster)
-        z.writestr("config/places/cms-names.parquet", out.getvalue())
+        jar_file.writestr("places_matcher_model/data/blocking_model", booster)
+        jar_file.writestr("config/places/cms-names.parquet", out.getvalue())
     return str(path)

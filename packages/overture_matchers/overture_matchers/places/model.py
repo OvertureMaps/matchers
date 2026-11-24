@@ -2,9 +2,9 @@
 # Copyright (c) 2026 by the Overture Maps Foundation
 """The places model: settings read from the model jar, and the engines workers run.
 
-The driver reads the blocking settings once into ``PlacesModel``. The engine functions return
-``Column`` callables or lookups that read the boosters, sketches and Bloom
-filters out of the jar ``sc.addFile`` shipped to workers, once per process.
+The driver reads the blocking settings once into ``PlacesModel``. The engine
+functions return ``Column`` callables or lookups that read the boosters and
+sketches out of the jar ``sc.addFile`` shipped to workers, once per process.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from pyspark.sql.types import (
 
 from overture_matchers.places import features
 from overture_matchers.places.model_jar import open_model_jar
-from overture_matchers.sketches import BloomFilter, CountMinSketch
+from overture_matchers.sketches import CountMinSketch
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -44,8 +44,8 @@ SCORING_BOOSTER_RESOURCE = "places_matcher_model/data/model"
 NAME_SKETCH_RESOURCE = "config/places/cms-names.parquet"
 ADDRESS_SKETCH_RESOURCE = "config/places/cms-address.parquet"
 # Keys of names repeated at least 2 and 10 times in one H3 cell.
-NAME_H3_GE2_RESOURCE = "config/places/unique_name_h3_bin_ge_2.bin"
-NAME_H3_GE10_RESOURCE = "config/places/unique_name_h3_bin_ge_10.bin"
+UNIQUE_NAME_H3_BIN_GE2_RESOURCE = "config/places/unique_name_h3_bin_ge_2.bin"
+UNIQUE_NAME_H3_BIN_GE10_RESOURCE = "config/places/unique_name_h3_bin_ge_10.bin"
 
 
 @dataclass(frozen=True)
@@ -66,10 +66,10 @@ class PlacesModel:
     def load(cls, spark: SparkSession, model_jar: str) -> PlacesModel:
         """Read the settings from ``model_jar`` and check its booster's XGBoost version."""
         with open_model_jar(spark, model_jar) as jar:
-            return cls.from_jar(jar)
+            return cls.load_from_jar(jar)
 
     @classmethod
-    def from_jar(cls, jar: zipfile.ZipFile) -> PlacesModel:
+    def load_from_jar(cls, jar: zipfile.ZipFile) -> PlacesModel:
         """Read the settings from an open jar and check its booster's XGBoost version."""
         import xgboost
 
@@ -138,7 +138,9 @@ def check_xgboost_version(model_bytes: bytes, installed_version: str) -> None:
 
 
 @cache
-def load_sketch(jar_name: str, resource_path: str) -> tuple[CountMinSketch, int]:
+def load_count_min_sketch(
+    jar_name: str, resource_path: str
+) -> tuple[CountMinSketch, int]:
     """The token sketch at ``resource_path`` and the number of documents it counted."""
     table = pq.read_table(io.BytesIO(_read_jar_resource(resource_path, jar_name)))
     row = table.to_pylist()[0]
@@ -147,10 +149,10 @@ def load_sketch(jar_name: str, resource_path: str) -> tuple[CountMinSketch, int]
 
 def load_name_idf_sketch(jar_name: str) -> tuple[CountMinSketch, int]:
     """The name token sketch and the number of documents it counted."""
-    return load_sketch(jar_name, NAME_SKETCH_RESOURCE)
+    return load_count_min_sketch(jar_name, NAME_SKETCH_RESOURCE)
 
 
-def token_idf(sketch: CountMinSketch, num_documents: int, token: str) -> float:
+def compute_token_idf(sketch: CountMinSketch, num_documents: int, token: str) -> float:
     """Inverse document frequency of ``token``."""
     return math.log(num_documents / max(1, sketch.estimate_count(token))) + 1.0
 
@@ -160,29 +162,24 @@ def compute_name_idf(
 ) -> dict[str, float]:
     """Inverse document frequency of each distinct token. Null gives an empty map."""
     return {
-        token: token_idf(sketch, num_documents, token)
+        token: compute_token_idf(sketch, num_documents, token)
         for token in tokens or ()
         if token is not None
     }
 
 
 @cache
-def scoring_lookups(jar_name: str) -> features.PairwiseLookups:
-    """The token weights and name counts the pairwise features read from the jar."""
+def load_scoring_lookups(jar_name: str) -> features.PairwiseLookups:
+    """The token weights the pairwise features read from the jar."""
 
-    def idf(resource_path: str):
-        return partial(token_idf, *load_sketch(jar_name, resource_path))
-
-    def bloom(resource_path: str):
-        return BloomFilter(
-            _read_jar_resource(resource_path, jar_name)
-        ).might_contain_string
+    def bind_token_idf(resource_path: str) -> Callable[[str], float]:
+        return partial(
+            compute_token_idf, *load_count_min_sketch(jar_name, resource_path)
+        )
 
     return features.PairwiseLookups(
-        name_idf=idf(NAME_SKETCH_RESOURCE),
-        address_idf=idf(ADDRESS_SKETCH_RESOURCE),
-        name_repeated=bloom(NAME_H3_GE2_RESOURCE),
-        name_common=bloom(NAME_H3_GE10_RESOURCE),
+        compute_name_idf=bind_token_idf(NAME_SKETCH_RESOURCE),
+        compute_address_idf=bind_token_idf(ADDRESS_SKETCH_RESOURCE),
     )
 
 
@@ -195,7 +192,7 @@ def bind_name_idf_udf(jar_name: str) -> Callable[[Column], Column]:
     return F.udf(compute_idf_map, MapType(StringType(), DoubleType(), False))
 
 
-def _matrix(feature_columns: Sequence[pd.Series]):
+def _build_feature_matrix(feature_columns: Sequence[pd.Series]):
     import numpy as np
 
     return np.column_stack(feature_columns).astype(np.float32)
@@ -208,7 +205,9 @@ def predict_match_probability(
     import numpy as np
 
     return pd.Series(
-        booster.inplace_predict(_matrix(feature_columns)).astype(np.float64)
+        booster.inplace_predict(_build_feature_matrix(feature_columns)).astype(
+            np.float64
+        )
     )
 
 
@@ -235,12 +234,13 @@ MARGIN = "margin"
 PROBABILITY = "probability"
 
 
-def margin_and_probability(booster, columns: Sequence[pd.Series]) -> pd.DataFrame:
+def predict_margin_and_probability(
+    booster, feature_columns: Sequence[pd.Series]
+) -> pd.DataFrame:
     """Raw margin and positive-class probability for each row, widened to double."""
     import numpy as np
-    import pandas as pd
 
-    matrix = _matrix(columns)
+    matrix = _build_feature_matrix(feature_columns)
     return pd.DataFrame(
         {
             MARGIN: booster.inplace_predict(matrix, predict_type="margin"),
@@ -249,21 +249,23 @@ def margin_and_probability(booster, columns: Sequence[pd.Series]) -> pd.DataFram
     ).astype(np.float64)
 
 
-def margin_and_probability_udf(
-    jar_name: str, resource: str
+def bind_margin_and_probability_udf(
+    jar_name: str, resource_path: str
 ) -> Callable[[list[Column]], Column]:
-    """Struct of ``margin_and_probability`` over feature columns, with the shipped booster.
+    """Bind ``predict_margin_and_probability`` over feature columns, with the shipped booster.
 
     Args:
         jar_name: File name of the shipped model jar.
-        resource: Booster path inside the jar.
+        resource_path: Booster path inside the jar.
     """
 
-    def score(*columns: pd.Series) -> pd.DataFrame:
-        return margin_and_probability(load_xgboost_booster(jar_name, resource), columns)
+    def score_batch(*feature_columns: pd.Series) -> pd.DataFrame:
+        return predict_margin_and_probability(
+            load_xgboost_booster(jar_name, resource_path), feature_columns
+        )
 
     schema = StructType(
         [StructField(MARGIN, DoubleType()), StructField(PROBABILITY, DoubleType())]
     )
-    udf = F.pandas_udf(score, schema, F.PandasUDFType.SCALAR)
-    return lambda inputs: udf(*inputs)
+    udf = F.pandas_udf(score_batch, schema, F.PandasUDFType.SCALAR)
+    return lambda feature_inputs: udf(*feature_inputs)
