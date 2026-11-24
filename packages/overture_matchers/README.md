@@ -45,7 +45,7 @@ python -m overture_matchers.places.job params.json
 
 The first local run downloads the Sedona, GraphFrames and hadoop-aws jars from Maven into `~/.ivy2` (about 750 MB).
 
-Every job param, the run folder layout and the rerun rules are in [Running a matcher](https://github.com/OvertureMaps/matchers/blob/main/packages/overture_matchers/docs/running.md).
+Every job param and the run folder layout are in the [run reference](https://github.com/OvertureMaps/matchers/blob/main/packages/overture_matchers/docs/run-reference.md).
 
 ## Modules
 
@@ -73,7 +73,14 @@ stay accurate as a module grows. Technical detail goes in docs/, not here.
 
 ## Documentation
 
-Technical detail lives in the package's [docs directory](https://github.com/OvertureMaps/matchers/tree/main/packages/overture_matchers/docs), one page per topic. The design for the port is in [python-migration.md](https://github.com/OvertureMaps/matchers/blob/main/docs/python-migration.md).
+Technical detail lives in the package's [docs directory](https://github.com/OvertureMaps/matchers/tree/main/packages/overture_matchers/docs), grouped by what the reader needs:
+
+| Need | Page |
+| --- | --- |
+| Look up a param or the run folder layout | [Run reference](https://github.com/OvertureMaps/matchers/blob/main/packages/overture_matchers/docs/run-reference.md) |
+| Look up a job's stages and outputs | [Places job](https://github.com/OvertureMaps/matchers/blob/main/packages/overture_matchers/docs/places.md) |
+| Understand how a run resumes | [How reruns work](https://github.com/OvertureMaps/matchers/blob/main/packages/overture_matchers/docs/reruns.md) |
+| Understand the design of the port | [python-migration.md](https://github.com/OvertureMaps/matchers/blob/main/docs/python-migration.md) |
 
 ## Development
 

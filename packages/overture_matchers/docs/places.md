@@ -1,6 +1,6 @@
 # Places job
 
-`overture_matchers.places.job.PlacesMatchingJob` matches the `place` feature type. The shared params and run folder layout are in [Running a matcher](running.md).
+`overture_matchers.places.job.PlacesMatchingJob` matches the `place` feature type. The shared params and run folder layout are in the [run reference](run-reference.md).
 
 ## Params
 

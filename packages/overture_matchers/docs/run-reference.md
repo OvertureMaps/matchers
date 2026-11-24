@@ -1,6 +1,6 @@
-# Running a matcher
+# Run reference
 
-Every job takes the same params and writes the same run folder layout. The commands that start a run are in the [package README](../README.md#run).
+The params every job takes and the folder layout every run writes. The commands that start a run are in the [package README](../README.md#run), and the reasoning behind the layout is in [How reruns work](reruns.md).
 
 ## Job params
 
@@ -32,25 +32,3 @@ A run writes zstd parquet under `outputPath`, one folder per output and feature 
 ```
 
 The output folder names match the Scala matchers' layout. Each job's page lists its stages and their outputs.
-
-## Reruns
-
-A rerun on the same folder skips every stage that has a marker and reads that stage's outputs instead. A marker is written only after all of its stage's outputs, so an interrupted stage runs again. Each feature type has its own marker.
-
-```mermaid
-%%{init: {"theme": "dark", "flowchart": {"padding": 14}, "themeVariables": {"fontSize": "14px", "fontFamily": "Montserrat, Arial, sans-serif", "mainBkg": "#001A39", "nodeBorder": "#0EC1BD", "lineColor": "#4051CC", "primaryTextColor": "#FFFFFF", "edgeLabelBackground": "#001A39"}}}%%
-flowchart LR
-    classDef default rx:8,ry:8,stroke-width:0.75px
-    Q{Stage marker exists?}
-    Q -->|no| R[Run the stage]
-    R --> W[Write its outputs]
-    W --> K[Write the marker]
-    K --> D[Read the outputs]
-    Q -->|yes| D
-    D --> N[Next stage]
-```
-
-> [!WARNING]
-> A rerun with changed params fails once any stage has finished, because the finished stages ran with the old params. Start a new run folder instead.
-
-Before any stage finishes, a new `config.json` replaces the old one, so a retry with corrected params works in the same folder.
