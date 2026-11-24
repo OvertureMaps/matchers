@@ -15,7 +15,7 @@ A matcher assigns IDs. It compares incoming records from a data provider against
 uv add overture-matchers
 ```
 
-PySpark and Sedona are not runtime dependencies, because the Glue runtime provides both. A run outside Glue needs them installed alongside the package, at the versions Glue 5.0 pairs with:
+PySpark and Sedona are not runtime dependencies, because the Spark platform that runs a job provides both. An environment without them, such as a local run, needs them installed alongside the package. The package is tested against these versions:
 
 ```sh
 uv add overture-matchers 'pyspark[sql]==3.5.4' apache-sedona==1.8.1
@@ -25,7 +25,7 @@ A local Spark session also needs Java 17.
 
 ## Run
 
-On AWS Glue, `overture_matchers.places.job.PlacesMatchingJob` is the job class. It extends `SparkSedonaJob` from overture-spark, and its `run(params)` takes the job params as a dict.
+On a managed Spark platform, `overture_matchers.places.job.PlacesMatchingJob` is the job class. It extends `SparkSedonaJob` from overture-spark, and its `run(params)` takes the job params as a dict.
 
 Locally, each job module runs from the command line on a local Sedona session, with the params in a JSON file:
 
