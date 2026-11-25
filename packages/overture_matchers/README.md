@@ -61,7 +61,7 @@ stay accurate as modules grow. Technical detail goes in docs/, not here.
 | `core.stages` | The typed outputs each stage returns, and `run_stage`, which runs each stage, writes the stage's outputs, marks the stage done and skips finished stages on reruns. |
 | `core.io` | Reads and writes inside the run folder: output paths, stage markers and lineage-cutting checkpoints. |
 | `core.local` | Running a job on a local Sedona session from a JSON params file. |
-| `ids` | Assigning GERS IDs to the records that win their cluster. |
+| `ids` | Assigning GERS IDs to the selected matches. |
 | `metrics` | Run metrics every theme shares, and turning metrics into output rows. |
 | `places` | The places matcher. |
 

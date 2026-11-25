@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 by the Overture Maps Foundation
-"""GERS ID minting for candidates that win their cluster."""
+"""GERS ID assignment for selected matches."""
 
 from __future__ import annotations
 
@@ -18,35 +18,40 @@ ID_MAP = "idMap"
 
 def assign_ids(
     candidates: DataFrame,
-    winners: DataFrame,
+    selected_matches: DataFrame,
     provider: str,
     output_path: str | None = None,
     feature_type: str = "place",
 ) -> DataFrame:
-    """Give each winning candidate row its baseline ID, or a new UUID if it has none.
+    """Give each selected candidate its baseline ID, or a new UUID if it has none.
 
-    Candidates that are not winners are dropped. Each row gets its own UUID, so
-    duplicate raw rows get distinct IDs. The rows are pinned before the ``id`` to
-    ``assigned_id`` mapping is written as ``idMap``, so the mapping and the result
-    agree on the random UUIDs.
+    If a candidate is not in ``selected_matches``, we drop it. We draw a new UUID
+    for each row, so duplicate raw rows get different IDs. We checkpoint the rows
+    before writing ``idMap``, so ``idMap`` and the returned rows have the same
+    UUIDs.
 
     Args:
         candidates: Raw candidates.
-        winners: ``id`` and ``base_id`` of each winner.
+        selected_matches: ``id`` and ``base_id`` of each selected match.
         provider: The provider written to the result.
         output_path: Run folder for ``idMap``, or None to stay in memory. With a
             run folder, the SparkContext needs a checkpoint directory.
         feature_type: Feature type of the ``idMap`` folder.
 
     Returns:
-        The winning candidates with their assigned ``id`` and ``provider``.
+        The selected candidates with their assigned ``id`` and ``provider``.
     """
     assigned = (
         candidates.alias("candidates")
-        .join(winners.alias("winners"), F.col("candidates.id") == F.col("winners.id"))
+        .join(
+            selected_matches.alias("selected_matches"),
+            F.col("candidates.id") == F.col("selected_matches.id"),
+        )
         .select(
             "candidates.*",
-            F.coalesce("winners.base_id", F.expr("uuid()")).alias("assigned_id"),
+            F.coalesce("selected_matches.base_id", F.expr("uuid()")).alias(
+                "assigned_id"
+            ),
         )
     )
     if output_path is None:

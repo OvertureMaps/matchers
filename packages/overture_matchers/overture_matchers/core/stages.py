@@ -38,7 +38,7 @@ class MatchingOutput(NamedTuple):
 
 
 class AssignIdsOutput(NamedTuple):
-    """Records with IDs, and candidates folded into another record."""
+    """The records with their IDs, and the fallout."""
 
     final: DataFrame
     fallout: DataFrame

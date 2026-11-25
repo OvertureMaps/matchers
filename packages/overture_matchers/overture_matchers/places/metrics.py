@@ -84,7 +84,7 @@ def compute_match_type_distribution(inputs: MetricInputs) -> list[MetricRow]:
         (
             "MatchCandidateDuplicateShare",
             compute_percentage(
-                candidate_duplicate_count, inputs.prepared_candidates.count()
+                candidate_duplicate_count, inputs.finalized_candidates.count()
             ),
             "",
         ),
@@ -100,8 +100,8 @@ def summarize_match_clusters(matches: DataFrame) -> DataFrame:
     """Summarize ``matches`` to one row per cluster.
 
     Columns: ``cluster_id``, ``type`` (baseline-only, candidates-only, no-match or
-    match), ``entity_count`` (distinct IDs on either side, a null ``base_id``
-    included), ``candidate_ids``, ``candidate_count`` and ``first_id``.
+    match), ``cluster_size`` (distinct IDs on either side, a null ``base_id``
+    included), ``candidate_ids``, ``candidate_entity_count`` and ``first_id``.
     """
 
     def all_rows_have_sub_type(sub_type: str) -> Column:
@@ -135,7 +135,7 @@ def summarize_match_clusters(matches: DataFrame) -> DataFrame:
         .select(
             "cluster_id",
             "type",
-            F.size("entities").alias("entity_count"),
+            F.size("entities").alias("cluster_size"),
             F.array_distinct(
                 F.transform(
                     F.filter("candidate_entries", lambda entry: entry["is_candidate"]),
@@ -144,7 +144,7 @@ def summarize_match_clusters(matches: DataFrame) -> DataFrame:
             ).alias("candidate_ids"),
             "first_id",
         )
-        .withColumn("candidate_count", F.size("candidate_ids"))
+        .withColumn("candidate_entity_count", F.size("candidate_ids"))
     )
 
 
@@ -184,10 +184,12 @@ def compute_cluster_stats(inputs: MetricInputs) -> list[MetricRow]:
         .collect()
     }
     relevant = clusters_df.where(F.col("type").isin("match", "candidates-only"))
-    sizes = relevant.agg(*_build_size_stat_columns("entity_count")).first()
-    candidate_sizes = relevant.agg(*_build_size_stat_columns("candidate_count")).first()
+    sizes = relevant.agg(*_build_size_stat_columns("cluster_size")).first()
+    candidate_sizes = relevant.agg(
+        *_build_size_stat_columns("candidate_entity_count")
+    ).first()
     duplicated = clusters_df.where(
-        F.col("entity_count") - F.col("candidate_count") > 1
+        F.col("cluster_size") - F.col("candidate_entity_count") > 1
     ).count()
     rows: list[MetricRow] = [
         ("MatchClusterCountByType", float(count), cluster_type)
@@ -197,7 +199,7 @@ def compute_cluster_stats(inputs: MetricInputs) -> list[MetricRow]:
         (
             "MatchSingletonRate",
             compute_percentage(
-                by_type.get("no-match", 0), inputs.prepared_candidates.count()
+                by_type.get("no-match", 0), inputs.finalized_candidates.count()
             ),
             "",
         )
@@ -218,8 +220,8 @@ def compute_cluster_size_by_country(inputs: MetricInputs) -> list[MetricRow]:
     An ID in both candidates and baseline has two country rows, so its cluster is
     counted once per row.
     """
-    countries = inputs.prepared_candidates.select("id", "country").unionByName(
-        inputs.prepared_baseline.select("id", "country")
+    countries = inputs.finalized_candidates.select("id", "country").unionByName(
+        inputs.finalized_baseline.select("id", "country")
     )
     relevant = (
         summarize_match_clusters(inputs.matches)
@@ -230,14 +232,14 @@ def compute_cluster_size_by_country(inputs: MetricInputs) -> list[MetricRow]:
         relevant.join(countries, relevant["first_id"] == countries["id"])
         .groupBy("country")
         .agg(
-            F.percentile("candidate_count", 0.99).alias("p99"),
-            F.percentile("candidate_count", 0.95).alias("p95"),
-            F.percentile("candidate_count", 0.75).alias("p75"),
-            F.percentile("candidate_count", 0.5).alias("p50"),
-            F.percentile("candidate_count", 0.25).alias("p25"),
-            F.max("candidate_count").alias("max"),
-            F.min("candidate_count").alias("min"),
-            F.avg("candidate_count").alias("avg"),
+            F.percentile("candidate_entity_count", 0.99).alias("p99"),
+            F.percentile("candidate_entity_count", 0.95).alias("p95"),
+            F.percentile("candidate_entity_count", 0.75).alias("p75"),
+            F.percentile("candidate_entity_count", 0.5).alias("p50"),
+            F.percentile("candidate_entity_count", 0.25).alias("p25"),
+            F.max("candidate_entity_count").alias("max"),
+            F.min("candidate_entity_count").alias("min"),
+            F.avg("candidate_entity_count").alias("avg"),
             F.count("cluster_id").alias("total"),
         )
         .collect()
@@ -269,7 +271,7 @@ def compute_gers_id_uniqueness(inputs: MetricInputs) -> list[MetricRow]:
 
 def _filter_non_history_candidates(inputs: MetricInputs) -> DataFrame:
     """Filter to candidates that setup did not already match through history."""
-    return inputs.prepared_candidates.where(F.col("base_ids").isNull())
+    return inputs.finalized_candidates.where(F.col("base_ids").isNull())
 
 
 def _filter_candidates_passing_blocking(
@@ -291,16 +293,16 @@ def _filter_candidates_passing_blocking(
 
 def compute_blocking_metrics(inputs: MetricInputs) -> list[MetricRow]:
     """Compute pass and block rates of the candidate feed, and partners per candidate."""
-    if inputs.blocking is None:
+    if inputs.blocking_pairs is None:
         return []
     candidate_feed = _filter_non_history_candidates(inputs)
     total = candidate_feed.count()
     passed = _filter_candidates_passing_blocking(
-        candidate_feed, inputs.blocking
+        candidate_feed, inputs.blocking_pairs
     ).count()
     blocked_rate = (total - passed) / total if total > 0 else 0.0
 
-    blocking_pairs = inputs.blocking
+    blocking_pairs = inputs.blocking_pairs
     candidate_partners = (
         blocking_pairs.where(F.col("record_type") == CANDIDATE)
         .select("id", F.col("base_id").alias("partner_id"))
@@ -343,8 +345,8 @@ def compute_match_rates(inputs: MetricInputs) -> list[MetricRow]:
     The ingest rate is over every candidate. The relative rate leaves out history
     matches and candidates that did not pass blocking, so it needs ``blocking``.
     """
-    candidates = inputs.prepared_candidates.count()
-    history = inputs.prepared_candidates.where(F.col("base_ids").isNotNull()).count()
+    candidates = inputs.finalized_candidates.count()
+    history = inputs.finalized_candidates.where(F.col("base_ids").isNotNull()).count()
     matched = (
         summarize_match_clusters(inputs.matches)
         .cache()
@@ -356,9 +358,9 @@ def compute_match_rates(inputs: MetricInputs) -> list[MetricRow]:
     rows: list[MetricRow] = [
         ("MatchRateIngest", compute_percentage(matched, candidates), "")
     ]
-    if inputs.blocking is not None:
+    if inputs.blocking_pairs is not None:
         passed = _filter_candidates_passing_blocking(
-            _filter_non_history_candidates(inputs), inputs.blocking
+            _filter_non_history_candidates(inputs), inputs.blocking_pairs
         ).count()
         rows.append(
             ("MatchRateRelative", compute_percentage(matched - history, passed), "")

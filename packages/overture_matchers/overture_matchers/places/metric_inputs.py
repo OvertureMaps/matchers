@@ -80,7 +80,7 @@ def load_optional_metric_inputs(
         ),
     )
     found = {
-        "blocking": _try_load_optional_input(
+        "blocking_pairs": _try_load_optional_input(
             "blocking metrics",
             lambda: io.read_output_if_present(
                 spark, config.output_path, "blocking", feature_type

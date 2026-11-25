@@ -28,10 +28,10 @@ flowchart LR
 | --- | --- | --- |
 | `setup` | Normalizes candidates and baseline, and attaches history matches when `matchHistory` is true. | `candidates`, `baseline` |
 | `matching` | Generates pairs, scores them and clusters the matches. | `matches` |
-| `assign_ids` | Picks cluster winners and assigns GERS IDs. | `final`, `fallout`, `idMap` |
+| `assign_ids` | Selects the best match in each cluster and assigns GERS IDs. | `final`, `fallout`, `idMap` |
 | `metrics` | Counts matches and churn. | `metrics` |
 
-`final` holds the records with their IDs, and `fallout` holds the candidates folded into another record. `idMap` maps each winning candidate's `id` to the ID it was assigned.
+`final` holds the records with their IDs, and `fallout` lists the other candidates in each cluster. Each one points to the selected candidate it duplicates. `idMap` maps each selected candidate's `id` to the ID it was assigned.
 
 ## Optional metrics inputs
 
@@ -39,7 +39,7 @@ The `metrics` stage also reads these inputs when a run has them. When one is mis
 
 | Input | Read from | Feeds |
 | --- | --- | --- |
-| `blocking` | `blocking/` in the run folder | Blocking metrics, and the relative match rate |
+| `blocking_pairs` | `blocking/` in the run folder | Blocking metrics, and the relative match rate |
 | `scores` | `scores/` in the run folder | Score metrics, and a sample of about 200 MB for the feature stats |
 | Feature order | `modelJar` | Feature stats |
 | Reference dataset | `modelJar`, copied to `places_matcher_model/` in the run folder | Feature drift against the model's reference data |

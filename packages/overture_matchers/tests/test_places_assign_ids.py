@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 by the Overture Maps Foundation
-"""Tests winner selection and ID assignment on a few clusters."""
+"""Tests best match selection and ID assignment on a few clusters."""
 
 import pytest
 from pyspark.sql import functions as F
 
 from overture_matchers.ids import assign_ids
-from overture_matchers.places.selection import select_cluster_winners_and_fallout
+from overture_matchers.places.selection import select_best_matches_and_fallout
 
 PAIR_COLUMNS = [
     "cluster_id",
@@ -46,13 +46,13 @@ MATCHES = [
     build_match_pair("occurrences", "z", "B-two", CANDIDATE_BASELINE_KIND, 0.4),
     build_match_pair("occurrences", "w", "B-two", CANDIDATE_BASELINE_KIND, 0.3),
     build_match_pair("occurrences", "z", "B-two", BASELINE_BASELINE_KIND, 0.1),
-    # a baseline ID with no candidate pair cannot win
+    # a baseline ID with no candidate pair is never selected
     build_match_pair("no_candidate_pair", "q", "B-q", CANDIDATE_BASELINE_KIND, 0.5),
     build_match_pair("no_candidate_pair", "B-r", "B-s", BASELINE_BASELINE_KIND, 0.5),
-    # a null candidate ID still folds into the winner
+    # a null candidate ID is still fallout
     build_match_pair("null_id", None, "d1", CANDIDATE_CANDIDATE_KIND, 0.5),
     build_match_pair("null_id", "d1", "d2", CANDIDATE_CANDIDATE_KIND, 0.5),
-    # candidate-only clusters fold in IDs without a record type
+    # in candidate-only clusters, IDs without a record type are fallout too
     ("untyped", "e1", None, "e2", None, *CANDIDATE_CANDIDATE_KIND, 0.4),
     # a null cluster_id is one cluster
     build_match_pair(None, "m", "B-m", CANDIDATE_BASELINE_KIND, 0.5),
@@ -64,16 +64,16 @@ BASELINE = [("B-active", 1), ("B-deleted", 0), ("B-q", 1)]
 def selected(spark):
     matches = spark.createDataFrame(MATCHES, PAIR_COLUMNS)
     baseline = spark.createDataFrame(BASELINE, "id string, active int")
-    winners, fallout = select_cluster_winners_and_fallout(matches, baseline)
+    selected_matches, fallout = select_best_matches_and_fallout(matches, baseline)
     return (
-        {tuple(row) for row in winners.collect()},
+        {tuple(row) for row in selected_matches.collect()},
         {tuple(row) for row in fallout.collect()},
     )
 
 
-def test_winners(selected):
-    winners, _ = selected
-    assert winners == {
+def test_selected_matches(selected):
+    selected_matches, _ = selected
+    assert selected_matches == {
         ("n", None),
         ("c2", None),
         ("y", "B-active"),
@@ -85,7 +85,7 @@ def test_winners(selected):
     }
 
 
-def test_a_cluster_without_a_winner_raises(spark):
+def test_a_cluster_without_a_selected_match_raises(spark):
     # "s" is both a candidate and a baseline ID, so the cluster has no CB pair.
     matches = spark.createDataFrame(
         [
@@ -96,10 +96,10 @@ def test_a_cluster_without_a_winner_raises(spark):
     )
     baseline = spark.createDataFrame([("b1", 1)], "id string, active int")
     with pytest.raises(ValueError, match="orphan"):
-        select_cluster_winners_and_fallout(matches, baseline)
+        select_best_matches_and_fallout(matches, baseline)
 
 
-def test_fallout_folds_losing_candidates_into_the_winner(selected):
+def test_fallout_maps_other_candidates_to_the_selected_match(selected):
     _, fallout = selected
     assert fallout == {
         ("c1", "c2"),
@@ -112,14 +112,14 @@ def test_fallout_folds_losing_candidates_into_the_winner(selected):
     }
 
 
-def test_select_cluster_winners_and_fallout_adds_missing_match_columns(spark):
+def test_select_best_matches_and_fallout_adds_missing_match_columns(spark):
     matches = spark.createDataFrame([("n",)], "id string").withColumn(
         "cluster_id", F.lit("c")
     )
     matches = matches.withColumn("match_type", F.lit("nomatch"))
     baseline = spark.createDataFrame([], "id string, active int")
-    winners, fallout = select_cluster_winners_and_fallout(matches, baseline)
-    assert [tuple(row) for row in winners.collect()] == [("n", None)]
+    selected_matches, fallout = select_best_matches_and_fallout(matches, baseline)
+    assert [tuple(row) for row in selected_matches.collect()] == [("n", None)]
     assert fallout.count() == 0
 
 
@@ -129,13 +129,13 @@ def test_assign_ids_reuses_baseline_ids_and_mints_uuids(spark, tmp_path, output_
     candidates = spark.createDataFrame(
         [("a", "A"), ("b", "B"), ("b", "B2"), ("c", "C")], "id string, name string"
     )
-    winners = spark.createDataFrame(
+    selected_matches = spark.createDataFrame(
         [("a", "B-1"), ("b", None), ("ghost", None)], "id string, base_id string"
     )
     run = str(tmp_path / output_path) if output_path else None
     if run:
         spark.sparkContext.setCheckpointDir(str(tmp_path / "checkpoints"))
-    final = assign_ids(candidates, winners, "acme", run)
+    final = assign_ids(candidates, selected_matches, "acme", run)
     rows = {r["name"]: r for r in final.collect()}
     assert final.columns == ["id", "name", "provider"]
     assert set(rows) == {"A", "B", "B2"}

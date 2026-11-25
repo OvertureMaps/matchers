@@ -25,10 +25,10 @@ PAIRS = [
 def build_metric_inputs(spark, **optional):
     candidates = spark.createDataFrame([("a",), ("b",), ("c",)], "id string")
     baseline = spark.createDataFrame([("B1",), ("B2",)], "id string")
-    prepared_candidates = spark.createDataFrame(
+    finalized_candidates = spark.createDataFrame(
         [("a", ["B1"]), ("b", None), ("c", None)], "id string, base_ids array<string>"
     )
-    prepared_baseline = spark.createDataFrame(
+    finalized_baseline = spark.createDataFrame(
         [("B1", "acme", 1), ("B2", "other", 1), ("B3", "acme", 0)],
         "id string, provider string, active int",
     )
@@ -46,8 +46,8 @@ def build_metric_inputs(spark, **optional):
     return shared.MetricInputs(
         candidates,
         baseline,
-        prepared_candidates,
-        prepared_baseline,
+        finalized_candidates,
+        finalized_baseline,
         matches,
         results,
         "acme",
@@ -113,10 +113,10 @@ def test_cluster_stats(spark):
 def test_cluster_size_by_country(spark):
     inputs = build_metric_inputs(spark)
     inputs = inputs._replace(
-        prepared_candidates=spark.createDataFrame(
+        finalized_candidates=spark.createDataFrame(
             [("a", "US"), ("b", "CA"), ("c", "CA")], "id string, country string"
         ),
-        prepared_baseline=spark.createDataFrame(
+        finalized_baseline=spark.createDataFrame(
             [("B1", "US")], "id string, country string"
         ),
     )
@@ -219,15 +219,15 @@ def test_summarize_match_clusters_keeps_a_null_candidate_id(spark):
     )
     [row] = places.summarize_match_clusters(matches).collect()
     assert sorted(row["candidate_ids"], key=str) == [None, "c"]
-    assert row["candidate_count"] == 2
+    assert row["candidate_entity_count"] == 2
 
 
 def test_blocking_metrics_and_relative_match_rate(spark):
-    blocking = spark.createDataFrame(
+    blocking_pairs = spark.createDataFrame(
         [("b", "candidate", "B1", "baseline"), ("b", "candidate", "c", "candidate")],
         "id string, record_type string, base_id string, base_record_type string",
     )
-    inputs = build_metric_inputs(spark, blocking=blocking)
+    inputs = build_metric_inputs(spark, blocking_pairs=blocking_pairs)
     rows = index_metrics_by_key(places.compute_blocking_metrics(inputs))
     assert rows[("MatchBlockingTotalCandidates", "")] == 2
     assert rows[("MatchBlockingPassedRate", "")] == 1.0

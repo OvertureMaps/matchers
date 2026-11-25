@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 by the Overture Maps Foundation
-"""Run metrics shared by all themes, and the plumbing that turns metrics into rows.
+"""Metrics and associated plumbing (theme-agnostic).
 
 A metric is a function from `MetricInputs` to a list of ``(metric_id, value,
 sub_partition)`` tuples. A metric that raises is logged and contributes no rows.
@@ -50,19 +50,19 @@ ROW_SCHEMA = StructType(
 class MetricInputs(NamedTuple):
     """Everything a metric can read.
 
-    ``candidates`` and ``baseline`` are the raw inputs, ``prepared_*`` are setup's
+    ``candidates`` and ``baseline`` are the raw inputs, ``finalized_*`` are setup's
     outputs, and ``results`` is the assigned output. The last six fields are optional:
     a metric that needs a missing one has no rows.
     """
 
     candidates: DataFrame
     baseline: DataFrame
-    prepared_candidates: DataFrame
-    prepared_baseline: DataFrame
+    finalized_candidates: DataFrame
+    finalized_baseline: DataFrame
     matches: DataFrame
     results: DataFrame
     provider: str
-    blocking: DataFrame | None = None
+    blocking_pairs: DataFrame | None = None
     scores: DataFrame | None = None
     # A sample of ``scores`` that is small enough to profile feature by feature.
     score_sample: DataFrame | None = None
@@ -92,8 +92,8 @@ def _filter_by_provider(records: DataFrame, provider: str) -> DataFrame:
 
 def compute_total_counts(inputs: MetricInputs) -> list[MetricRow]:
     """Compute input, active baseline and result counts."""
-    provider_baseline = _filter_by_provider(inputs.prepared_baseline, inputs.provider)
-    active_baseline = _filter_active_records(inputs.prepared_baseline)
+    provider_baseline = _filter_by_provider(inputs.finalized_baseline, inputs.provider)
+    active_baseline = _filter_active_records(inputs.finalized_baseline)
     provider_active = _filter_active_records(provider_baseline)
     counts = {
         "MatchCandidateInputCount": inputs.candidates.count(),
@@ -119,7 +119,7 @@ def compute_match_result_breakdown(inputs: MetricInputs) -> list[MetricRow]:
     Dropped counts are active records of the run's provider that no result carries,
     and the IDs among them that no other provider keeps active.
     """
-    baseline = inputs.prepared_baseline
+    baseline = inputs.finalized_baseline
     results = inputs.results
     total = results.count()
 
@@ -166,8 +166,8 @@ def compute_match_result_breakdown(inputs: MetricInputs) -> list[MetricRow]:
 
 def compute_history_match_metrics(inputs: MetricInputs) -> list[MetricRow]:
     """Compute candidates that setup matched through history, and their share."""
-    total = inputs.prepared_candidates.count()
-    matched = inputs.prepared_candidates.where(F.col("base_ids").isNotNull()).count()
+    total = inputs.finalized_candidates.count()
+    matched = inputs.finalized_candidates.where(F.col("base_ids").isNotNull()).count()
     rate = round_half_up(compute_percentage(matched, total), 2)
     return [
         ("MatchHistoryMatchCount", float(matched), ""),

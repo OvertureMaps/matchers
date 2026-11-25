@@ -44,7 +44,7 @@ from overture_matchers.places.runtime import (
     bind_jvm_text_functions,
     register_text_udfs,
 )
-from overture_matchers.places.selection import select_cluster_winners_and_fallout
+from overture_matchers.places.selection import select_best_matches_and_fallout
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -115,12 +115,16 @@ def assign_ids(
     provider: str,
     output_path: str | None = None,
 ) -> AssignIdsOutput:
-    """Pick cluster winners and assign GERS IDs."""
-    winners, fallout = select_cluster_winners_and_fallout(
+    """Select the best match in each cluster and assign GERS IDs."""
+    selected_matches, fallout = select_best_matches_and_fallout(
         matched.matches, prepared.baseline
     )
     final = ids.assign_ids(
-        raw.candidates, winners, provider, output_path, feature_type=FEATURE_TYPE
+        raw.candidates,
+        selected_matches,
+        provider,
+        output_path,
+        feature_type=FEATURE_TYPE,
     )
     return AssignIdsOutput(final, fallout)
 
