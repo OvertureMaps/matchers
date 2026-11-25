@@ -4,13 +4,15 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from dataclasses import asdict, dataclass
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING, Any
 
 from overture_spark.hadoop_fs import list_files, read_json, write_text
 from overture_spark.job import is_unset
+from py4j.protocol import Py4JJavaError
 
 from overture_matchers.core import io
 
@@ -25,14 +27,19 @@ _PARAM_FIELDS = {
     "input": "input",
     "baseline": "baseline",
     "provider": "provider",
+    "baselineProvider": "baseline_provider",
     "matchHistory": "match_history",
     "embeddingsCacheTable": "embeddings_cache_table",
     "previousMetricsPath": "previous_metrics_path",
     "modelJar": "model_jar",
+    "blockingResolution": "blocking_resolution",
 }
 _REQUIRED = ("output_path", "input", "baseline", "provider")
 _BOOLS = ("match_history",)
 _PATH_MAPS = ("input", "baseline")
+
+LIBPOSTAL_DATA_DIR_CONF = "spark.sedona.libpostal.dataDir"
+_SEDONA_PARSE_ADDRESS_CLASS = "org.apache.spark.sql.sedona_sql.expressions.ParseAddress"
 
 
 def _parse_bool(value: Any) -> bool:
@@ -44,8 +51,38 @@ def _parse_bool(value: Any) -> bool:
     raise ValueError(f"expected true or false, got {value!r}")
 
 
-def _s3a(path: str) -> str:
-    # Hadoop's S3 connector works on any Spark platform with hadoop-aws.
+def _parse_blocking_resolution(value: Any) -> int:
+    if not isinstance(value, bool) and isinstance(value, (int, str)):
+        with contextlib.suppress(ValueError):
+            resolution = int(value)
+            if 1 <= resolution <= 23:
+                return resolution
+    raise ValueError(
+        f"blockingResolution must be an integer from 1 to 23, got {value!r}"
+    )
+
+
+def _sedona_version(spark: SparkSession) -> str | None:
+    """The Sedona jar's artifact and version, else the Python package's version.
+
+    The jar is read first because address parsing runs there, and Glue loads
+    the jar and the Python package separately.
+    """
+    jvm = spark.sparkContext._jvm
+    loader = jvm.java.lang.Thread.currentThread().getContextClassLoader()
+    with contextlib.suppress(Py4JJavaError):
+        jar = jvm.java.lang.Class.forName(
+            _SEDONA_PARSE_ADDRESS_CLASS, False, loader
+        ).getPackage()
+        if jar is not None and jar.getImplementationVersion():
+            return f"{jar.getImplementationTitle()}:{jar.getImplementationVersion()}"
+    with contextlib.suppress(PackageNotFoundError):
+        return version("apache-sedona")
+    return None
+
+
+def rewrite_s3_to_s3a(path: str) -> str:
+    """Rewrite an ``s3://`` URI to ``s3a://`` so Hadoop's S3A connector handles it."""
     return "s3a://" + path[len("s3://") :] if path.startswith("s3://") else path
 
 
@@ -66,28 +103,36 @@ def _parse_path_map(param: str, value: Any) -> dict[str, list[str]]:
         paths = [paths] if isinstance(paths, str) else paths
         if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
             raise error
-        path_map[feature_type] = [_s3a(p) for p in paths]
+        path_map[feature_type] = [rewrite_s3_to_s3a(p) for p in paths]
     return path_map
 
 
+# TODO: Split theme-specific fields out of this shared RunConfig once the other
+# themes land, so unrelated runs do not carry null fields in config.json.
 @dataclass(frozen=True)
 class RunConfig:
     """Settings for one matching run.
 
     Attributes:
+        baseline_provider: Provider to stamp on a baseline that has no
+            ``provider`` column, such as a Places release. Places only.
         match_history: Whether candidates with history matches skip scoring.
         model_jar: The ``places-matcher-model`` jar. Only places reads it.
+        blocking_resolution: Quadkey zoom (1 to 23) for ``blocking_keys`` and
+            ``signature`` in places setup. Places defaults to 16 when unset.
     """
 
     output_path: str
     input: dict[str, list[str]]
     baseline: dict[str, list[str]]
     provider: str
+    baseline_provider: str | None = None
     # Scala's theme configs default this to true.
     match_history: bool = True
     embeddings_cache_table: str | None = None
     previous_metrics_path: str | None = None
     model_jar: str | None = None
+    blocking_resolution: int | None = None
 
     @classmethod
     def from_params(cls, params: dict[str, Any]) -> RunConfig:
@@ -103,20 +148,30 @@ class RunConfig:
         missing = [f for f in _REQUIRED if f not in values]
         if missing:
             raise ValueError(f"missing required params: {missing}")
-        values["output_path"] = _s3a(values["output_path"].rstrip("/"))
-        if "previous_metrics_path" in values:
-            values["previous_metrics_path"] = _s3a(values["previous_metrics_path"])
+        values["output_path"] = rewrite_s3_to_s3a(values["output_path"].rstrip("/"))
+        for field in ("previous_metrics_path", "model_jar"):
+            if field in values:
+                values[field] = rewrite_s3_to_s3a(values[field])
         for field in _BOOLS:
             if field in values:
                 values[field] = _parse_bool(values[field])
+        if "blocking_resolution" in values:
+            values["blocking_resolution"] = _parse_blocking_resolution(
+                values["blocking_resolution"]
+            )
         for field in _PATH_MAPS:
             values[field] = _parse_path_map(field, values[field])
         return cls(**values)
 
-    def to_json(self) -> str:
-        """Every field plus the matcher version."""
+    def to_json(self, spark: SparkSession) -> str:
+        """Every field, the libpostal data dir and the library versions."""
         record = asdict(self) | {
-            "versions": {"overture-matchers": version("overture-matchers")}
+            "libpostal_data_dir": spark.conf.get(LIBPOSTAL_DATA_DIR_CONF, None),
+            "versions": {
+                "overture-matchers": version("overture-matchers"),
+                "phonenumbers": version("phonenumbers"),
+                "sedona": _sedona_version(spark),
+            },
         }
         return json.dumps(record, indent=2, sort_keys=True)
 
@@ -132,7 +187,7 @@ class RunConfig:
         """
         config = cls.from_params(params)
         path = io.run_uri(config.output_path, "config.json")
-        record = config.to_json()
+        record = config.to_json(spark)
         if io.any_stage_done(spark, config.output_path) and list_files(spark, path):
             old, new = read_json(spark, path), json.loads(record)
             changed = sorted(
