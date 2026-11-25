@@ -83,12 +83,19 @@ def test_from_params_rejects_missing_required_bad_bool_and_bad_map():
         RunConfig.from_params(PARAMS | {"baseline": '{"place": '})
 
 
-def test_for_run_writes_config_json_with_versions(spark, tmp_path):
-    RunConfig.for_run(spark, PARAMS | {"outputPath": str(tmp_path)})
+def test_for_run_writes_config_json_with_lineage(spark, tmp_path):
+    spark.conf.set("spark.sedona.libpostal.dataDir", "/data/libpostal")
+    try:
+        RunConfig.for_run(spark, PARAMS | {"outputPath": str(tmp_path)})
+    finally:
+        spark.conf.unset("spark.sedona.libpostal.dataDir")
     record = json.loads((tmp_path / "config.json").read_text())
     assert record["provider"] == "acme"
     assert record["match_history"] is True
-    assert "overture-matchers" in record["versions"]
+    assert record["libpostal_data_dir"] == "/data/libpostal"
+    assert set(record["versions"]) == {"overture-matchers", "phonenumbers", "sedona"}
+    assert record["versions"]["sedona"].startswith("org.apache.sedona:")
+    assert record["versions"]["sedona"].endswith(":1.9.1")
 
 
 def test_for_run_rejects_changed_params_only_once_a_stage_is_done(spark, tmp_path):

@@ -10,12 +10,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
-from overture_matchers.core.config import rewrite_s3_to_s3a
+from overture_matchers.core.config import LIBPOSTAL_DATA_DIR_CONF, rewrite_s3_to_s3a
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
-
-LIBPOSTAL_DATA_DIR_CONF = "spark.sedona.libpostal.dataDir"
 
 
 def ship_libpostal_data_to_workers(spark: SparkSession) -> None:

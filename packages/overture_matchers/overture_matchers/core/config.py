@@ -7,11 +7,12 @@ from __future__ import annotations
 import contextlib
 import json
 from dataclasses import asdict, dataclass
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING, Any
 
 from overture_spark.hadoop_fs import list_files, read_json, write_text
 from overture_spark.job import is_unset
+from py4j.protocol import Py4JJavaError
 
 from overture_matchers.core import io
 
@@ -37,6 +38,9 @@ _REQUIRED = ("output_path", "input", "baseline", "provider")
 _BOOLS = ("match_history",)
 _PATH_MAPS = ("input", "baseline")
 
+LIBPOSTAL_DATA_DIR_CONF = "spark.sedona.libpostal.dataDir"
+_SEDONA_PARSE_ADDRESS_CLASS = "org.apache.spark.sql.sedona_sql.expressions.ParseAddress"
+
 
 def _parse_bool(value: Any) -> bool:
     if isinstance(value, bool):
@@ -56,6 +60,25 @@ def _parse_blocking_resolution(value: Any) -> int:
     raise ValueError(
         f"blockingResolution must be an integer from 1 to 23, got {value!r}"
     )
+
+
+def _sedona_version(spark: SparkSession) -> str | None:
+    """The Sedona jar's artifact and version, else the Python package's version.
+
+    The jar is read first because address parsing runs there, and Glue loads
+    the jar and the Python package separately.
+    """
+    jvm = spark.sparkContext._jvm
+    loader = jvm.java.lang.Thread.currentThread().getContextClassLoader()
+    with contextlib.suppress(Py4JJavaError):
+        jar = jvm.java.lang.Class.forName(
+            _SEDONA_PARSE_ADDRESS_CLASS, False, loader
+        ).getPackage()
+        if jar is not None and jar.getImplementationVersion():
+            return f"{jar.getImplementationTitle()}:{jar.getImplementationVersion()}"
+    with contextlib.suppress(PackageNotFoundError):
+        return version("apache-sedona")
+    return None
 
 
 def rewrite_s3_to_s3a(path: str) -> str:
@@ -140,10 +163,15 @@ class RunConfig:
             values[field] = _parse_path_map(field, values[field])
         return cls(**values)
 
-    def to_json(self) -> str:
-        """Every field plus the matcher version."""
+    def to_json(self, spark: SparkSession) -> str:
+        """Every field, the libpostal data dir and the library versions."""
         record = asdict(self) | {
-            "versions": {"overture-matchers": version("overture-matchers")}
+            "libpostal_data_dir": spark.conf.get(LIBPOSTAL_DATA_DIR_CONF, None),
+            "versions": {
+                "overture-matchers": version("overture-matchers"),
+                "phonenumbers": version("phonenumbers"),
+                "sedona": _sedona_version(spark),
+            },
         }
         return json.dumps(record, indent=2, sort_keys=True)
 
@@ -159,7 +187,7 @@ class RunConfig:
         """
         config = cls.from_params(params)
         path = io.run_uri(config.output_path, "config.json")
-        record = config.to_json()
+        record = config.to_json(spark)
         if io.any_stage_done(spark, config.output_path) and list_files(spark, path):
             old, new = read_json(spark, path), json.loads(record)
             changed = sorted(
