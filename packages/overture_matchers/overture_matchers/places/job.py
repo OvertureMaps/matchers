@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from overture_spark.job import SparkSedonaJob
 from pyspark import StorageLevel
 
+from overture_matchers import ids
 from overture_matchers.core import io
 from overture_matchers.core.config import RunConfig
 from overture_matchers.core.libpostal import ship_libpostal_data_to_workers
@@ -25,6 +26,13 @@ from overture_matchers.core.stages import (
     SetupOutput,
     run_stage,
 )
+from overture_matchers.metrics import (
+    MetricInputs,
+    build_metrics_dataframe,
+    compute_metrics,
+)
+from overture_matchers.places.metric_inputs import load_optional_metric_inputs
+from overture_matchers.places.metrics import METRICS
 from overture_matchers.places.prepare import (
     BLOCKING_RESOLUTION,
     add_base_ids,
@@ -36,11 +44,15 @@ from overture_matchers.places.runtime import (
     bind_jvm_text_functions,
     register_text_udfs,
 )
+from overture_matchers.places.selection import select_cluster_winners_and_fallout
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from pyspark.sql import SparkSession
 
 FEATURE_TYPE = "place"
+THEME = "places"
 # GraphFrames build. Its jar also carries the Python API.
 PACKAGES = ("graphframes:graphframes:0.8.3-spark3.4-s_2.12",)
 
@@ -100,20 +112,47 @@ def assign_ids(
     raw: RawInputs,
     prepared: SetupOutput,
     matched: MatchingOutput,
+    provider: str,
     output_path: str | None = None,
 ) -> AssignIdsOutput:
     """Pick cluster winners and assign GERS IDs."""
-    raise NotImplementedError("places assign_ids is not ported yet")
+    winners, fallout = select_cluster_winners_and_fallout(
+        matched.matches, prepared.baseline
+    )
+    final = ids.assign_ids(
+        raw.candidates, winners, provider, output_path, feature_type=FEATURE_TYPE
+    )
+    return AssignIdsOutput(final, fallout)
 
 
 def metrics(
     raw: RawInputs,
     prepared: SetupOutput,
     matched: MatchingOutput,
-    ids: AssignIdsOutput,
+    assigned: AssignIdsOutput,
+    provider: str,
+    load_optional_inputs: Callable[[], dict[str, object]] = dict,
 ) -> MetricsOutput:
-    """Count matches and churn."""
-    raise NotImplementedError("places metrics is not ported yet")
+    """Count matches and churn.
+
+    ``load_optional_inputs`` returns the optional `MetricInputs` fields that this run
+    has. It is called only when the stage runs.
+    """
+    inputs = MetricInputs(
+        raw.candidates,
+        raw.baseline,
+        prepared.candidates,
+        prepared.baseline,
+        matched.matches,
+        assigned.final,
+        provider,
+        **load_optional_inputs(),
+    )
+    rows = compute_metrics(inputs, METRICS)
+    spark = raw.candidates.sparkSession
+    return MetricsOutput(
+        build_metrics_dataframe(spark, rows, THEME, FEATURE_TYPE, provider)
+    )
 
 
 def run(spark: SparkSession, config: RunConfig) -> None:
@@ -142,7 +181,7 @@ def run(spark: SparkSession, config: RunConfig) -> None:
     matched = run_stage(
         spark, config, FEATURE_TYPE, matching, prepared, output_path=config.output_path
     )
-    ids = run_stage(
+    assigned = run_stage(
         spark,
         config,
         FEATURE_TYPE,
@@ -150,9 +189,23 @@ def run(spark: SparkSession, config: RunConfig) -> None:
         raw,
         prepared,
         matched,
+        config.provider,
         output_path=config.output_path,
     )
-    run_stage(spark, config, FEATURE_TYPE, metrics, raw, prepared, matched, ids)
+    run_stage(
+        spark,
+        config,
+        FEATURE_TYPE,
+        metrics,
+        raw,
+        prepared,
+        matched,
+        assigned,
+        config.provider,
+        load_optional_inputs=lambda: load_optional_metric_inputs(
+            spark, config, FEATURE_TYPE
+        ),
+    )
 
 
 class PlacesMatchingJob(SparkSedonaJob):
