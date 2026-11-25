@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 by the Overture Maps Foundation
 """Tests the shared and places metrics on a few rows."""
 
 import json

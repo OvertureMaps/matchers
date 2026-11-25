@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 by the Overture Maps Foundation
 """Tests winner selection and ID assignment on a few clusters."""
 
 import pytest

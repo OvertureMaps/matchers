@@ -28,7 +28,19 @@ flowchart LR
 | --- | --- | --- |
 | `setup` | Normalizes candidates and baseline, and attaches history matches when `matchHistory` is true. | `candidates`, `baseline` |
 | `matching` | Generates pairs, scores them and clusters the matches. | `matches` |
-| `assign_ids` | Picks cluster winners and assigns GERS IDs. | `final`, `fallout` |
+| `assign_ids` | Picks cluster winners and assigns GERS IDs. | `final`, `fallout`, `idMap` |
 | `metrics` | Counts matches and churn. | `metrics` |
 
-`final` holds the records with their IDs, and `fallout` holds the candidates folded into another record.
+`final` holds the records with their IDs, and `fallout` holds the candidates folded into another record. `idMap` maps each winning candidate's `id` to the ID it was assigned.
+
+## Optional metrics inputs
+
+The `metrics` stage also reads these inputs when a run has them. When one is missing or fails to load, the stage logs a warning and skips the metrics that need it.
+
+| Input | Read from | Feeds |
+| --- | --- | --- |
+| `blocking` | `blocking/` in the run folder | Blocking metrics, and the relative match rate |
+| `scores` | `scores/` in the run folder | Score metrics, and a sample of about 200 MB for the feature stats |
+| Feature order | `modelJar` | Feature stats |
+| Reference dataset | `modelJar`, copied to `places_matcher_model/` in the run folder | Feature drift against the model's reference data |
+| Previous metrics | `previousMetricsPath` | Feature drift against a previous run |

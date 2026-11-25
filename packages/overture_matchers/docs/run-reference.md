@@ -17,7 +17,7 @@ Params keep the Scala matchers' argument names, so Scala argument sets work unch
 | `modelJar` | Places only | The `places-matcher-model` jar. |
 | `blockingResolution` | No | Places only. The quadkey zoom, from 1 to 23, for `blocking_keys` and `signature`. Defaults to 16. |
 | `embeddingsCacheTable` | No | Accepted and recorded in `config.json`. No stage reads this param yet. |
-| `previousMetricsPath` | No | Accepted and recorded in `config.json`. No stage reads this param yet. |
+| `previousMetricsPath` | No | A previous run's metrics. Places only. The `metrics` stage compares this run's score features against them. When the param is unset, that comparison is skipped. |
 
 `s3://` paths in `outputPath`, `input`, `baseline` and `previousMetricsPath` are rewritten to `s3a://`, the scheme that works on every Spark platform with hadoop-aws. Trailing slashes on `outputPath` are dropped.
 
@@ -35,6 +35,7 @@ Every run writes zstd parquet under `outputPath`, one folder per output and feat
   <output>/type=<feature_type>/                   one stage output
   _completed_stages/<stage>/type=<feature_type>   marker written after a stage's outputs
   checkpoints/                                    Spark checkpoint directory
+  places_matcher_model/                           places only: the model's reference dataset, copied from the model jar
 ```
 
 The output folder names match the Scala matchers' layout. Each job's page lists the job's stages and outputs.

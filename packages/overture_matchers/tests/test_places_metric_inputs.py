@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 by the Overture Maps Foundation
 """Tests loading the optional places metric inputs from a run folder."""
 
 import json
