@@ -39,9 +39,7 @@ def test_only_remote_libpostal_data_is_shipped(data_dir, expected_data):
     ship_libpostal_data_to_workers(spark)
     if expected_data is None:
         spark.sparkContext.addFile.assert_not_called()
-        spark.conf.set.assert_not_called()
     else:
-        spark.conf.set.assert_called_once_with(LIBPOSTAL_DATA_DIR_CONF, expected_data)
         spark.sparkContext.addFile.assert_called_once_with(
             expected_data, recursive=True
         )

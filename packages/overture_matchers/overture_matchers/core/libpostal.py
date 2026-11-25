@@ -32,8 +32,7 @@ def ship_libpostal_data_to_workers(spark: SparkSession) -> None:
     data_dir = spark.conf.get(LIBPOSTAL_DATA_DIR_CONF, None)
     if not data_dir:
         raise ValueError(f"set {LIBPOSTAL_DATA_DIR_CONF} to the libpostal v1.0.0 data")
-    # Local data dirs work as-is; only remote data needs shipping.
+    # Local data dirs work as-is. Sedona 1.9+ finds remote data among the
+    # shipped files by its folder name.
     if urlparse(data_dir).scheme not in ("", "file"):
-        normalized = rewrite_s3_to_s3a(data_dir)
-        spark.conf.set(LIBPOSTAL_DATA_DIR_CONF, normalized)
-        spark.sparkContext.addFile(normalized, recursive=True)
+        spark.sparkContext.addFile(rewrite_s3_to_s3a(data_dir), recursive=True)
