@@ -84,11 +84,15 @@ def test_from_params_rejects_missing_required_bad_bool_and_bad_map():
 
 
 def test_for_run_writes_config_json_with_lineage(spark, tmp_path):
+    previous_data_dir = spark.conf.get("spark.sedona.libpostal.dataDir", None)
     spark.conf.set("spark.sedona.libpostal.dataDir", "/data/libpostal")
     try:
         RunConfig.for_run(spark, PARAMS | {"outputPath": str(tmp_path)})
     finally:
-        spark.conf.unset("spark.sedona.libpostal.dataDir")
+        if previous_data_dir is None:
+            spark.conf.unset("spark.sedona.libpostal.dataDir")
+        else:
+            spark.conf.set("spark.sedona.libpostal.dataDir", previous_data_dir)
     record = json.loads((tmp_path / "config.json").read_text())
     assert record["provider"] == "acme"
     assert record["match_history"] is True
