@@ -7,15 +7,18 @@ Run locally with ``python -m overture_matchers.places.job <params.json>``.
 
 from __future__ import annotations
 
+import os
 import sys
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 from overture_spark.job import SparkSedonaJob
 from pyspark import StorageLevel
+from pyspark.sql import functions as F
 
 from overture_matchers import ids
 from overture_matchers.core import io
-from overture_matchers.core.config import RunConfig
+from overture_matchers.core.config import RunConfig, rewrite_s3_to_s3a
 from overture_matchers.core.libpostal import ship_libpostal_data_to_workers
 from overture_matchers.core.local import run_local
 from overture_matchers.core.stages import (
@@ -31,8 +34,15 @@ from overture_matchers.metrics import (
     build_metrics_dataframe,
     compute_metrics,
 )
+from overture_matchers.places.blocking import SPATIAL_JOIN_CONF, get_blocking_pairs
 from overture_matchers.places.metric_inputs import load_optional_metric_inputs
 from overture_matchers.places.metrics import METRICS
+from overture_matchers.places.model import (
+    BLOCKING_BOOSTER_RESOURCE,
+    PlacesModel,
+    bind_match_probability_udf,
+    bind_name_idf_udf,
+)
 from overture_matchers.places.prepare import (
     BLOCKING_RESOLUTION,
     add_base_ids,
@@ -103,9 +113,39 @@ def setup(
     return SetupOutput(candidates, baseline)
 
 
-def matching(prepared: SetupOutput, output_path: str | None = None) -> MatchingOutput:
-    """Generate pairs, score them and cluster the matches."""
-    raise NotImplementedError("places matching is not ported yet")
+def matching(
+    prepared: SetupOutput, model_jar: str, output_path: str | None = None
+) -> MatchingOutput:
+    """Generate pairs, score them and cluster the matches.
+
+    Args:
+        prepared: Output of ``setup``.
+        model_jar: Path or URI of the ``places-matcher-model`` jar, shipped to
+            Python workers for the booster and name sketch.
+        output_path: Run directory that receives the ``blocking`` checkpoint.
+    """
+    spark = prepared.candidates.sparkSession
+    normalized_jar = rewrite_s3_to_s3a(model_jar)
+    spark.sparkContext.addFile(normalized_jar)
+    model = PlacesModel.load(spark, normalized_jar)
+    jar_name = os.path.basename(urlparse(normalized_jar).path)
+    candidates_to_block = prepared.candidates.filter(F.col("base_ids").isNull()).drop(
+        "base_ids"
+    )
+    blocked_pairs = io.checkpoint(
+        get_blocking_pairs(
+            candidates_to_block,
+            prepared.baseline,
+            model,
+            bind_name_idf_udf(jar_name),
+            bind_match_probability_udf(jar_name, BLOCKING_BOOSTER_RESOURCE),
+        ),
+        output_path,
+        "blocking",
+        FEATURE_TYPE,
+    )
+    del blocked_pairs
+    raise NotImplementedError("matching: scoring and clustering are not ported yet")
 
 
 def assign_ids(
@@ -163,6 +203,9 @@ def run(spark: SparkSession, config: RunConfig) -> None:
         raise ValueError("places needs the modelJar param")
     # GraphFrames connected components needs a checkpoint directory.
     spark.sparkContext.setCheckpointDir(io.run_uri(config.output_path, "checkpoints"))
+    # Set once for the whole job, so fresh and resumed runs plan stages alike.
+    for key, value in SPATIAL_JOIN_CONF.items():
+        spark.conf.set(key, value)
     raw = RawInputs(
         spark.read.parquet(*config.input[FEATURE_TYPE]),
         spark.read.parquet(*config.baseline[FEATURE_TYPE]),
@@ -179,7 +222,13 @@ def run(spark: SparkSession, config: RunConfig) -> None:
         blocking_resolution=config.blocking_resolution or BLOCKING_RESOLUTION,
     )
     matched = run_stage(
-        spark, config, FEATURE_TYPE, matching, prepared, output_path=config.output_path
+        spark,
+        config,
+        FEATURE_TYPE,
+        matching,
+        prepared,
+        model_jar=config.model_jar,
+        output_path=config.output_path,
     )
     assigned = run_stage(
         spark,
