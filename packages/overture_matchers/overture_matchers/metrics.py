@@ -144,7 +144,7 @@ def compute_match_result_breakdown(inputs: MetricInputs) -> list[MetricRow]:
         results.select("id"), "id", "left_anti"
     ).select("id")
     from_others = _filter_active_records(baseline).where(
-        ~F.coalesce(F.col("provider") == inputs.provider, F.lit(False))
+        ~F.col("provider").eqNullSafe(inputs.provider)
     )
     dropped_ids = dropped_records.distinct().join(
         from_others.select("id"), "id", "left_anti"

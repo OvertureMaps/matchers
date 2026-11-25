@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from pyspark.sql import functions as F
@@ -39,10 +38,6 @@ SCORE_BUCKETS = (
 
 def _coerce_to_float(value: object) -> float:
     return 0.0 if value is None else float(value)
-
-
-def _compute_exact_percentile(column_name: str, quantile: float) -> Column:
-    return F.expr(f"percentile({column_name}, {quantile})")
 
 
 def _build_stat_metric_rows(
@@ -110,9 +105,7 @@ def summarize_match_clusters(matches: DataFrame) -> DataFrame:
     """
 
     def all_rows_have_sub_type(sub_type: str) -> Column:
-        return F.sum((F.col("match_sub_type") == sub_type).cast("int")) == F.count(
-            F.lit(1)
-        )
+        return F.bool_and(F.col("match_sub_type").eqNullSafe(sub_type))
 
     # Structs keep a null candidate ID apart from a non-candidate side.
     candidate_side = F.array(
@@ -155,19 +148,13 @@ def summarize_match_clusters(matches: DataFrame) -> DataFrame:
     )
 
 
-# Keeps the last matches table's clusters cached until the next call.
-@lru_cache(maxsize=1)
-def _get_cached_match_clusters(matches: DataFrame) -> DataFrame:
-    return summarize_match_clusters(matches).cache()
-
-
 def _build_size_stat_columns(column_name: str) -> list[Column]:
     column = F.col(column_name)
     return [
-        _compute_exact_percentile(column_name, 0.99).alias("p99"),
-        _compute_exact_percentile(column_name, 0.75).alias("p75"),
-        _compute_exact_percentile(column_name, 0.5).alias("p50"),
-        _compute_exact_percentile(column_name, 0.25).alias("p25"),
+        F.percentile(column_name, 0.99).alias("p99"),
+        F.percentile(column_name, 0.75).alias("p75"),
+        F.percentile(column_name, 0.5).alias("p50"),
+        F.percentile(column_name, 0.25).alias("p25"),
         F.avg(column).alias("avg"),
         F.stddev(column).alias("std"),
         F.min(column).alias("min"),
@@ -189,7 +176,7 @@ CLUSTER_SIZE_SUFFIXES = {
 
 def compute_cluster_stats(inputs: MetricInputs) -> list[MetricRow]:
     """Compute clusters by type, singleton rate, duplicated IDs and size profiles."""
-    clusters_df = _get_cached_match_clusters(inputs.matches)
+    clusters_df = summarize_match_clusters(inputs.matches).cache()
     by_type = {
         row["type"]: row["count"]
         for row in clusters_df.groupBy("type")
@@ -234,18 +221,20 @@ def compute_cluster_size_by_country(inputs: MetricInputs) -> list[MetricRow]:
     countries = inputs.prepared_candidates.select("id", "country").unionByName(
         inputs.prepared_baseline.select("id", "country")
     )
-    relevant = _get_cached_match_clusters(inputs.matches).where(
-        F.col("type").isin("match", "candidates-only")
+    relevant = (
+        summarize_match_clusters(inputs.matches)
+        .cache()
+        .where(F.col("type").isin("match", "candidates-only"))
     )
     stats = (
         relevant.join(countries, relevant["first_id"] == countries["id"])
         .groupBy("country")
         .agg(
-            _compute_exact_percentile("candidate_count", 0.99).alias("p99"),
-            _compute_exact_percentile("candidate_count", 0.95).alias("p95"),
-            _compute_exact_percentile("candidate_count", 0.75).alias("p75"),
-            _compute_exact_percentile("candidate_count", 0.5).alias("p50"),
-            _compute_exact_percentile("candidate_count", 0.25).alias("p25"),
+            F.percentile("candidate_count", 0.99).alias("p99"),
+            F.percentile("candidate_count", 0.95).alias("p95"),
+            F.percentile("candidate_count", 0.75).alias("p75"),
+            F.percentile("candidate_count", 0.5).alias("p50"),
+            F.percentile("candidate_count", 0.25).alias("p25"),
             F.max("candidate_count").alias("max"),
             F.min("candidate_count").alias("min"),
             F.avg("candidate_count").alias("avg"),
@@ -312,24 +301,25 @@ def compute_blocking_metrics(inputs: MetricInputs) -> list[MetricRow]:
     blocked_rate = (total - passed) / total if total > 0 else 0.0
 
     blocking_pairs = inputs.blocking
-    per_candidate = (
+    candidate_partners = (
         blocking_pairs.where(F.col("record_type") == CANDIDATE)
-        .groupBy("id")
-        .agg(F.count("base_id").alias("partner_count"))
-        .union(
-            blocking_pairs.where(F.col("base_record_type") == CANDIDATE)
-            .groupBy(F.col("base_id").alias("id"))
-            .agg(F.count("id").alias("partner_count"))
+        .select("id", F.col("base_id").alias("partner_id"))
+        .unionByName(
+            blocking_pairs.where(F.col("base_record_type") == CANDIDATE).select(
+                F.col("base_id").alias("id"), F.col("id").alias("partner_id")
+            )
         )
-        .groupBy("id")
-        .agg(F.sum("partner_count").alias("partner_count"))
+    )
+    per_candidate = (
+        candidate_partners.groupBy("id")
+        .agg(F.count("partner_id").alias("partner_count"))
         .join(candidate_feed.select("id"), "id")
     )
     partners = per_candidate.agg(
         F.avg("partner_count").alias("mean"),
         F.stddev("partner_count").alias("std"),
-        _compute_exact_percentile("partner_count", 0.5).alias("median"),
-        _compute_exact_percentile("partner_count", 0.99).alias("p99"),
+        F.percentile("partner_count", 0.5).alias("median"),
+        F.percentile("partner_count", 0.99).alias("p99"),
         F.max("partner_count").alias("max"),
     ).first()
     rows: list[MetricRow] = [
@@ -356,7 +346,8 @@ def compute_match_rates(inputs: MetricInputs) -> list[MetricRow]:
     candidates = inputs.prepared_candidates.count()
     history = inputs.prepared_candidates.where(F.col("base_ids").isNotNull()).count()
     matched = (
-        _get_cached_match_clusters(inputs.matches)
+        summarize_match_clusters(inputs.matches)
+        .cache()
         .where(F.col("type") == "match")
         .select(F.explode("candidate_ids").alias("id"))
         .distinct()
@@ -405,9 +396,9 @@ def compute_feature_stats(inputs: MetricInputs) -> list[MetricRow]:
         aggregations += [
             F.mean(feature_name).alias(f"mean{index}"),
             F.stddev(feature_name).alias(f"std{index}"),
-            _compute_exact_percentile(feature_name, 0.5).alias(f"median{index}"),
-            _compute_exact_percentile(feature_name, 0.1).alias(f"p10{index}"),
-            _compute_exact_percentile(feature_name, 0.9).alias(f"p90{index}"),
+            F.percentile(feature_name, 0.5).alias(f"median{index}"),
+            F.percentile(feature_name, 0.1).alias(f"p10{index}"),
+            F.percentile(feature_name, 0.9).alias(f"p90{index}"),
         ]
     row = sample.agg(*aggregations).first()
     rows: list[MetricRow] = []

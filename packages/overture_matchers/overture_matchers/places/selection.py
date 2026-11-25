@@ -10,7 +10,7 @@ from pyspark.sql import Window
 from pyspark.sql import functions as F
 
 if TYPE_CHECKING:
-    from pyspark.sql import Column, DataFrame
+    from pyspark.sql import DataFrame
 
 CANDIDATE = "candidate"
 NO_MATCH = "nomatch"
@@ -18,6 +18,7 @@ BASELINE_BASELINE = "baseline_baseline"
 CANDIDATE_CANDIDATE = "candidate_candidate"
 CANDIDATE_BASELINE = "candidate_baseline"
 
+# Match columns we expect to be of string type.
 STRING_COLUMNS = (
     "id",
     "record_type",
@@ -44,7 +45,11 @@ def coalesce_match_schema(matches: DataFrame) -> DataFrame:
 
 
 def add_base_active(matches: DataFrame, baseline: DataFrame) -> DataFrame:
-    """Set ``base_active`` to the max ``active`` of the baseline ID, or 1 if unknown."""
+    """Check if any of the providers for a given GERS ID are active.
+
+    If they are, or the GERS ID is missing from the baseline, set base_active=1 on the
+    matches to that GERS ID.
+    """
     active_by_id = baseline.groupBy(F.col("id").alias("_active_id")).agg(
         F.max("active").alias("_active")
     )
@@ -56,30 +61,19 @@ def add_base_active(matches: DataFrame, baseline: DataFrame) -> DataFrame:
     )
 
 
-def _column_equals(column_name: str, value: str) -> Column:
-    # A null column never equals the value.
-    return F.coalesce(F.col(column_name) == value, F.lit(False))
-
-
 def _classify_clusters(matches: DataFrame) -> DataFrame:
     """Add ``_cluster_kind``: nomatch, baseline_only, candidate_only or best_match."""
     cluster_window = Window.partitionBy("cluster_id")
     cluster_size = F.count(F.lit(1)).over(cluster_window)
-    all_baseline_baseline = (
-        F.sum(_column_equals("match_sub_type", BASELINE_BASELINE).cast("int")).over(
-            cluster_window
-        )
-        == cluster_size
-    )
-    all_candidate_candidate = (
-        F.sum(_column_equals("match_sub_type", CANDIDATE_CANDIDATE).cast("int")).over(
-            cluster_window
-        )
-        == cluster_size
-    )
+    all_baseline_baseline = F.bool_and(
+        F.col("match_sub_type").eqNullSafe(BASELINE_BASELINE)
+    ).over(cluster_window)
+    all_candidate_candidate = F.bool_and(
+        F.col("match_sub_type").eqNullSafe(CANDIDATE_CANDIDATE)
+    ).over(cluster_window)
     cluster_kind = (
         F.when(
-            (cluster_size == 1) & _column_equals("match_type", NO_MATCH),
+            (cluster_size == 1) & F.col("match_type").eqNullSafe(NO_MATCH),
             "nomatch",
         )
         .when(all_baseline_baseline, "baseline_only")
@@ -121,12 +115,21 @@ def _select_best_inner_candidate(classified_matches: DataFrame) -> DataFrame:
 
 
 def _select_best_baseline_match(classified_matches: DataFrame) -> DataFrame:
-    """Select the baseline ID with best (active, occurrences, score) and candidate.
+    """Select the best baseline ID in each cluster, and its best candidate.
 
-    A baseline ID without a candidate-baseline pair cannot win.
+    Each baseline ID's best candidate comes from its candidate-baseline pairs. Higher
+    scores win, then larger candidate IDs. Baseline IDs without candidate-baseline
+    pairs cannot win.
+
+    Baseline IDs are then ranked by these keys, in order of priority:
+
+    1. Active baseline IDs rank above inactive ones.
+    2. Baseline IDs that appear in more of the cluster's pairs rank higher.
+    3. Higher best-candidate scores rank higher.
+    4. Larger baseline IDs rank higher, then larger candidate IDs.
     """
     best_match_pairs = classified_matches.where(F.col("_cluster_kind") == "best_match")
-    is_candidate_baseline_pair = _column_equals("match_sub_type", CANDIDATE_BASELINE)
+    is_candidate_baseline_pair = F.col("match_sub_type").eqNullSafe(CANDIDATE_BASELINE)
     per_baseline_id = (
         best_match_pairs.groupBy("cluster_id", "base_id")
         .agg(

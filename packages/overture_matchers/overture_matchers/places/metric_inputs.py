@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 by the Overture Maps Foundation
-"""Loads the places metric inputs that a run may lack."""
+"""Loads optional places metric inputs."""
 
 from __future__ import annotations
 
