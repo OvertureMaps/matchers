@@ -1,11 +1,18 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 by the Overture Maps Foundation
-"""Shared pytest fixtures: one local Sedona session for the whole test run."""
+"""Shared pytest fixtures: one local Sedona session and a tiny places model jar."""
 
+import io
+import json
 import os
 import sys
+import zipfile
 
+import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
+import xgboost
 from overture_spark import SparkPlatform, getSparkSedonaSession
 
 from overture_matchers.places.job import PACKAGES
@@ -63,3 +70,51 @@ def spark():
     )
     yield session
     session.stop()
+
+
+FEATURES = ["name_tfidf", "name_similarity", "geo_distance"]
+NUM_DOCUMENTS = 100
+SKETCH = {"cafe": 100, "rare": 1}
+CONFIG = {
+    "feature_order": FEATURES,
+    "prediction_threshold": 0.5,
+    "spatial_radius_m": 400.0,
+}
+
+
+def train_xgboost_booster(feature_matrix, labels):
+    """A tiny binary booster saved as JSON."""
+    booster = xgboost.train(
+        {"objective": "binary:logistic", "max_depth": 2},
+        xgboost.DMatrix(feature_matrix, label=labels),
+        num_boost_round=10,
+    )
+    return bytes(booster.save_raw(raw_format="json"))
+
+
+@pytest.fixture(scope="session")
+def jar(spark, tmp_path_factory):
+    """A jar holding a blocking booster that keeps pairs with similar names."""
+    rng = np.random.default_rng(0)
+    feature_matrix = rng.random((400, 3)) * [2.0, 1.0, 400.0]
+    booster = train_xgboost_booster(
+        feature_matrix, (feature_matrix[:, 1] > 0.5).astype(int)
+    )
+    words = spark.createDataFrame(
+        [(word,) for word, count in SKETCH.items() for _ in range(count)], ["word"]
+    )
+    sketch = words._jdf.stat().countMinSketch("word", 5, 1000, 1)
+    cms = pa.table(
+        {"cms_bytes": [bytes(sketch.toByteArray())], "num_docs": [NUM_DOCUMENTS]}
+    )
+    out = io.BytesIO()
+    pq.write_table(cms, out)
+    path = tmp_path_factory.mktemp("jar") / "tiny-model.jar"
+    with zipfile.ZipFile(path, "w") as jar_file:
+        jar_file.writestr(
+            "places_matcher_model/metadata/blocking_config",
+            json.dumps(CONFIG),
+        )
+        jar_file.writestr("places_matcher_model/data/blocking_model", booster)
+        jar_file.writestr("config/places/cms-names.parquet", out.getvalue())
+    return str(path)

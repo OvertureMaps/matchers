@@ -64,7 +64,9 @@ def stub_stages(spark, monkeypatch, restore_spatial_join_conf):
     ) -> SetupOutput:
         return SetupOutput(spark.range(1), spark.range(1))
 
-    def matching(prepared, model_jar, output_path=None) -> MatchingOutput:
+    def matching(
+        prepared, model_jar, output_path=None, embeddings_cache_table=None
+    ) -> MatchingOutput:
         raise NotImplementedError("matching is not ported")
 
     monkeypatch.setattr(job, "setup", setup)
@@ -112,7 +114,9 @@ def test_run_chains_stage_outputs_and_skips_on_rerun(
         calls["setup"] = (raw.candidates.count(), match_history, blocking_resolution)
         return SetupOutput(spark.range(3), spark.range(4))
 
-    def matching(prepared, model_jar, output_path=None) -> MatchingOutput:
+    def matching(
+        prepared, model_jar, output_path=None, embeddings_cache_table=None
+    ) -> MatchingOutput:
         calls["matching"] = (
             prepared.candidates.count(),
             prepared.baseline.count(),

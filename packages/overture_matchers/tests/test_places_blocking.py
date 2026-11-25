@@ -3,7 +3,7 @@
 """Tests for history pairs and place blocking on a few rows and a tiny model.
 
 Blocking rules run with stand-in engines. The jar fixture checks the real
-engines and the stage that binds them.
+engines.
 """
 
 import io
@@ -14,16 +14,14 @@ import zipfile
 
 import numpy as np
 import pandas as pd
-import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 import xgboost
+from conftest import CONFIG, FEATURES, NUM_DOCUMENTS
 from pyspark.sql import Row
 from pyspark.sql import functions as F
 
-from overture_matchers.core import io as stage_io
-from overture_matchers.core.stages import SetupOutput
-from overture_matchers.places import features, job
+from overture_matchers.places import features
 from overture_matchers.places.blocking import PAIR_COLUMNS, get_blocking_pairs
 from overture_matchers.places.model import (
     BLOCKING_BOOSTER_RESOURCE,
@@ -37,55 +35,12 @@ from overture_matchers.places.model import (
 from overture_matchers.prematch import generate_history_pairs
 from overture_matchers.sketches import CountMinSketch
 
-FEATURES = ["name_tfidf", "name_similarity", "geo_distance"]
-NUM_DOCUMENTS = 100
-SKETCH = {"cafe": 100, "rare": 1}
-CONFIG = {
-    "feature_order": FEATURES,
-    "prediction_threshold": 0.5,
-    "spatial_radius_m": 400.0,
-}
-
 
 @pytest.fixture(scope="module")
-def model_jar(spark, tmp_path_factory):
-    """A jar holding a blocking booster that keeps pairs with similar names."""
-    rng = np.random.default_rng(0)
-    x = rng.random((400, 3)) * [2.0, 1.0, 400.0]
-    y = (x[:, 1] > 0.5).astype(int)
-    booster = xgboost.train(
-        {"objective": "binary:logistic", "max_depth": 2},
-        xgboost.DMatrix(x, label=y),
-        num_boost_round=10,
-    )
-    words = spark.createDataFrame(
-        [(word,) for word, count in SKETCH.items() for _ in range(count)], ["word"]
-    )
-    sketch = words._jdf.stat().countMinSketch("word", 5, 1000, 1)
-    cms = pa.table(
-        {"cms_bytes": [bytes(sketch.toByteArray())], "num_docs": [NUM_DOCUMENTS]}
-    )
-    out = io.BytesIO()
-    pq.write_table(cms, out)
-    path = tmp_path_factory.mktemp("jar") / "tiny-model.jar"
-    with zipfile.ZipFile(path, "w") as jar_file:
-        jar_file.writestr(
-            "places_matcher_model/metadata/blocking_config",
-            json.dumps(CONFIG),
-        )
-        jar_file.writestr(
-            "places_matcher_model/data/blocking_model",
-            bytes(booster.save_raw(raw_format="json")),
-        )
-        jar_file.writestr("config/places/cms-names.parquet", out.getvalue())
-    return str(path)
-
-
-@pytest.fixture(scope="module")
-def shipped_jar_name(spark, model_jar):
+def shipped_jar_name(spark, jar):
     """File name of the jar, shipped to the workers."""
-    spark.sparkContext.addFile(model_jar)
-    return os.path.basename(model_jar)
+    spark.sparkContext.addFile(jar)
+    return os.path.basename(jar)
 
 
 def compute_unit_idf(tokens):
@@ -136,8 +91,8 @@ def build_places_dataframe(spark, rows):
     )
 
 
-def test_count_min_sketch_matches_the_jvm_estimate(model_jar):
-    with zipfile.ZipFile(model_jar) as jar_file:
+def test_count_min_sketch_matches_the_jvm_estimate(jar):
+    with zipfile.ZipFile(jar) as jar_file:
         table = pq.read_table(
             io.BytesIO(jar_file.read("config/places/cms-names.parquet"))
         )
@@ -157,10 +112,8 @@ def test_model_rejects_an_unknown_blocking_feature(monkeypatch):
         PlacesModel.from_config(CONFIG)
 
 
-def test_model_reads_the_jar_config(spark, model_jar):
-    assert PlacesModel.load(spark, model_jar) == PlacesModel(
-        tuple(FEATURES), 0.5, 400.0
-    )
+def test_model_reads_the_jar_config(spark, jar):
+    assert PlacesModel.load(spark, jar) == PlacesModel(tuple(FEATURES), 0.5, 400.0)
 
 
 def test_booster_from_a_newer_xgboost_is_rejected():
@@ -231,27 +184,6 @@ def test_get_blocking_pairs_keeps_close_similar_pairs_in_id_order(spark):
         ("a", "c"): ("baseline", "candidate"),
         ("b", "c"): ("candidate", "candidate"),
     }
-
-
-def test_matching_writes_blocking_with_the_jar_engines(spark, model_jar, tmp_path):
-    candidates = build_places_dataframe(
-        spark,
-        [
-            build_place_record("b", "blue cafe", 0.0, 0.0),
-            build_place_record("c", "blue cafe", 0.0, 0.001),
-            build_place_record("h", "blue cafe", 0.0, 0.0002),
-        ],
-    ).withColumn(
-        "base_ids",
-        F.when(F.col("id") == "h", F.array(F.lit("a"))).cast("array<string>"),
-    )
-    baseline = build_places_dataframe(
-        spark, [build_place_record("a", "red bar", 0.0, 0.0005)]
-    )
-    with pytest.raises(NotImplementedError, match="scoring"):
-        job.matching(SetupOutput(candidates, baseline), model_jar, str(tmp_path))
-    out = stage_io.read_output(spark, str(tmp_path), "blocking", job.FEATURE_TYPE)
-    assert {(row.id, row.base_id) for row in out.collect()} == {("b", "c")}
 
 
 def test_compute_name_idf_weighs_rare_tokens_more(shipped_jar_name):

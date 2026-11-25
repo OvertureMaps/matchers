@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 by the Overture Maps Foundation
-"""Spark session setup for the places stages: registering the model jar's JVM text UDFs.
+"""Spark session setup for the places stages: registering the model jar's JVM UDFs.
 
-The column logic in ``prepare`` takes its text functions as arguments, so it
-runs without the jar. Everything that needs the jar lives here.
+The column logic in ``prepare`` and ``scoring`` takes its JVM-backed functions
+as arguments, so it runs without the jar. Everything that needs the jar on the
+Spark classpath lives here.
 """
 
 from __future__ import annotations
@@ -16,13 +17,16 @@ from pyspark.sql.types import ArrayType, StringType
 from overture_matchers.places.prepare import TextFunctions
 
 if TYPE_CHECKING:
-    from pyspark.sql import SparkSession
+    from collections.abc import Callable
+
+    from pyspark.sql import Column, SparkSession
 
 _BLOOM_FEATURES_CLASS = "org.overturemaps.places.features.BloomFeatures"
 _COREWORD_FILTER_RESOURCE = "/config/places/coreword_bg_filter.bin"
 _NORMALIZE_TEXT_UDF = "normalize_text"
 _TOKENIZE_TEXT_UDF = "tokenize_text"
 _STRIP_BACKGROUND_TOKENS_UDF = "strip_background_tokens"
+_UNIQUE_NAME_H3_BIN_UDF = "unique_name_h3_bin"
 
 
 def register_text_udfs(spark: SparkSession) -> None:
@@ -49,6 +53,26 @@ def register_text_udfs(spark: SparkSession) -> None:
         stream.close()
     jvm.org.overturemaps.places.features.BloomFeatures.registerCoreword(
         spark._jsparkSession, _STRIP_BACKGROUND_TOKENS_UDF, filter_bytes
+    )
+
+
+def register_unique_name_h3_bin_udf(
+    spark: SparkSession, ge2_filter_bytes: bytes, ge10_filter_bytes: bytes
+) -> None:
+    """Register the model jar's resolution-5 H3 name-repetition bin UDF."""
+    jvm = spark.sparkContext._jvm
+    jvm.org.overturemaps.places.features.BloomFeatures.registerUniqueName(
+        spark._jsparkSession,
+        _UNIQUE_NAME_H3_BIN_UDF,
+        ge2_filter_bytes,
+        ge10_filter_bytes,
+    )
+
+
+def bind_unique_name_h3_bin_udf() -> Callable[[Column, Column, Column], Column]:
+    """Bind the JVM UDF registered by ``register_unique_name_h3_bin_udf``."""
+    return lambda name, latitude, longitude: F.call_udf(
+        _UNIQUE_NAME_H3_BIN_UDF, name, latitude, longitude
     )
 
 

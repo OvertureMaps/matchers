@@ -7,8 +7,10 @@ Run locally with ``python -m overture_matchers.places.job <params.json>``.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
+from functools import partial
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -34,15 +36,27 @@ from overture_matchers.metrics import (
     build_metrics_dataframe,
     compute_metrics,
 )
-from overture_matchers.places.blocking import SPATIAL_JOIN_CONF, get_blocking_pairs
+from overture_matchers.places import features
+from overture_matchers.places.blocking import (
+    SPATIAL_JOIN_CONF,
+    get_blocking_pairs,
+    get_shuffle_partition_count,
+    repartition_by_pair_key,
+)
 from overture_matchers.places.metric_inputs import load_optional_metric_inputs
 from overture_matchers.places.metrics import METRICS
 from overture_matchers.places.model import (
     BLOCKING_BOOSTER_RESOURCE,
+    SCORING_BOOSTER_RESOURCE,
+    UNIQUE_NAME_H3_BIN_GE2_RESOURCE,
+    UNIQUE_NAME_H3_BIN_GE10_RESOURCE,
     PlacesModel,
+    bind_margin_and_probability_udf,
     bind_match_probability_udf,
     bind_name_idf_udf,
+    load_scoring_lookups,
 )
+from overture_matchers.places.model_jar import CONFIG_RESOURCE, open_model_jar
 from overture_matchers.places.prepare import (
     BLOCKING_RESOLUTION,
     add_base_ids,
@@ -52,14 +66,21 @@ from overture_matchers.places.prepare import (
 )
 from overture_matchers.places.runtime import (
     bind_jvm_text_functions,
+    bind_unique_name_h3_bin_udf,
     register_text_udfs,
+    register_unique_name_h3_bin_udf,
+)
+from overture_matchers.places.scoring import (
+    MISSING_EMBEDDINGS_CACHE_MESSAGE,
+    PlacesPairScorer,
+    score_pairs,
 )
 from overture_matchers.places.selection import select_cluster_winners_and_fallout
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from pyspark.sql import SparkSession
+    from pyspark.sql import DataFrame, SparkSession
 
 FEATURE_TYPE = "place"
 THEME = "places"
@@ -113,22 +134,71 @@ def setup(
     return SetupOutput(candidates, baseline)
 
 
+def get_shipped_jar_name(model_jar: str) -> str:
+    """The name workers find ``model_jar`` under once it is shipped."""
+    return os.path.basename(urlparse(model_jar).path.rstrip("/"))
+
+
+def build_places_pair_scorer(config: dict, jar_name: str) -> PlacesPairScorer:
+    """The scorer of the jar's parsed scoring ``config``, reading the shipped jar."""
+    return PlacesPairScorer.from_config(
+        config,
+        get_lookups=partial(load_scoring_lookups, jar_name),
+        compute_unique_name_bin=bind_unique_name_h3_bin_udf(),
+        predict_scores=bind_margin_and_probability_udf(
+            jar_name, SCORING_BOOSTER_RESOURCE
+        ),
+    )
+
+
+def load_embeddings_cache(
+    spark: SparkSession, scorer: PlacesPairScorer, table_name: str | None
+) -> DataFrame | None:
+    """The embeddings cache ``table_name`` if ``scorer`` reads it, else None.
+
+    Raises:
+        ValueError: The scorer reads the cache, but ``table_name`` is None.
+    """
+    if not scorer.needs_embeddings:
+        return None
+    if table_name is None:
+        raise ValueError(MISSING_EMBEDDINGS_CACHE_MESSAGE)
+    return spark.table(table_name)
+
+
 def matching(
-    prepared: SetupOutput, model_jar: str, output_path: str | None = None
+    prepared: SetupOutput,
+    model_jar: str,
+    output_path: str | None = None,
+    embeddings_cache_table: str | None = None,
 ) -> MatchingOutput:
     """Generate pairs, score them and cluster the matches.
 
     Args:
         prepared: Output of ``setup``.
         model_jar: Path or URI of the ``places-matcher-model`` jar, shipped to
-            Python workers for the booster and name sketch.
-        output_path: Run directory that receives the ``blocking`` checkpoint.
+            Python workers for the boosters and sketches.
+        output_path: Run directory that receives the ``blocking`` and
+            ``scores`` checkpoints.
+        embeddings_cache_table: Table of name and taxonomy embeddings. It is
+            resolved before blocking, and only if the model has a cosine feature.
     """
     spark = prepared.candidates.sparkSession
     normalized_jar = rewrite_s3_to_s3a(model_jar)
     spark.sparkContext.addFile(normalized_jar)
-    model = PlacesModel.load(spark, normalized_jar)
-    jar_name = os.path.basename(urlparse(normalized_jar).path)
+    jar_name = get_shipped_jar_name(normalized_jar)
+    with open_model_jar(spark, normalized_jar) as jar:
+        model = PlacesModel.load_from_jar(jar)
+        scorer = build_places_pair_scorer(
+            json.loads(jar.read(CONFIG_RESOURCE)), jar_name
+        )
+        if features.UNIQUE_NAME_H3_CELL_COUNT_BIN in scorer.feature_order:
+            register_unique_name_h3_bin_udf(
+                spark,
+                jar.read(UNIQUE_NAME_H3_BIN_GE2_RESOURCE),
+                jar.read(UNIQUE_NAME_H3_BIN_GE10_RESOURCE),
+            )
+    embeddings_cache = load_embeddings_cache(spark, scorer, embeddings_cache_table)
     candidates_to_block = prepared.candidates.filter(F.col("base_ids").isNull()).drop(
         "base_ids"
     )
@@ -144,8 +214,17 @@ def matching(
         "blocking",
         FEATURE_TYPE,
     )
-    del blocked_pairs
-    raise NotImplementedError("matching: scoring and clustering are not ported yet")
+    scores = io.checkpoint(
+        repartition_by_pair_key(
+            score_pairs(blocked_pairs, scorer, embeddings_cache),
+            get_shuffle_partition_count(spark),
+        ),
+        output_path,
+        "scores",
+        FEATURE_TYPE,
+    )
+    del scores
+    raise NotImplementedError("matching: clustering is not ported yet")
 
 
 def assign_ids(
@@ -229,6 +308,7 @@ def run(spark: SparkSession, config: RunConfig) -> None:
         prepared,
         model_jar=config.model_jar,
         output_path=config.output_path,
+        embeddings_cache_table=config.embeddings_cache_table,
     )
     assigned = run_stage(
         spark,

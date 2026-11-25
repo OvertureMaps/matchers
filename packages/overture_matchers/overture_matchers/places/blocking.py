@@ -19,7 +19,7 @@ from overture_matchers.prematch import BASELINE, CANDIDATE
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from pyspark.sql import Column, DataFrame
+    from pyspark.sql import Column, DataFrame, SparkSession
 
     from overture_matchers.places.model import PlacesModel
 
@@ -56,7 +56,13 @@ SPATIAL_JOIN_CONF = {
 }
 
 
-def _repartition_by_pair_key(df: DataFrame, num_partitions: int) -> DataFrame:
+def get_shuffle_partition_count(spark: SparkSession) -> int:
+    """Partitions for the shuffles of blocking and scoring."""
+    return int(spark.conf.get(SHUFFLE_PARTITIONS_CONF, DEFAULT_SHUFFLE_PARTITIONS))
+
+
+def repartition_by_pair_key(df: DataFrame, num_partitions: int) -> DataFrame:
+    """``df`` hash partitioned on both sides' ``id`` and ``provider``."""
     return df.repartition(
         num_partitions, F.expr("xxhash64(id, provider, base_id, base_provider)")
     )
@@ -148,7 +154,7 @@ def prune_blocking_pairs(
     surviving_keys = scored_keys.filter(
         F.col("score") >= model.blocking_threshold
     ).drop("score")
-    return _repartition_by_pair_key(surviving_keys, num_partitions)
+    return repartition_by_pair_key(surviving_keys, num_partitions)
 
 
 def get_blocking_pairs(
@@ -174,9 +180,7 @@ def get_blocking_pairs(
         checkpoint the result.
     """
     spark = candidates.sparkSession
-    shuffle_partitions = int(
-        spark.conf.get(SHUFFLE_PARTITIONS_CONF, DEFAULT_SHUFFLE_PARTITIONS)
-    )
+    shuffle_partitions = get_shuffle_partition_count(spark)
     record_columns = [*RECORD_KEY, *PAIR_COLUMNS]
     unioned = (
         candidates.select(*record_columns)
@@ -232,4 +236,4 @@ def get_blocking_pairs(
             *[F.col(f"left.{column_name}") for column_name in output_columns],
         )
     )
-    return _repartition_by_pair_key(joined, shuffle_partitions)
+    return repartition_by_pair_key(joined, shuffle_partitions)
