@@ -9,37 +9,30 @@ from typing import TYPE_CHECKING
 from pyspark.sql import Window
 from pyspark.sql import functions as F
 
+from overture_matchers.clustering import (
+    BASELINE_BASELINE,
+    CANDIDATE_BASELINE,
+    CANDIDATE_CANDIDATE,
+    MATCH_RESULT_COLUMNS,
+    NO_MATCH,
+)
+from overture_matchers.prematch import CANDIDATE
+
 if TYPE_CHECKING:
     from pyspark.sql import Column, DataFrame
 
-CANDIDATE = "candidate"
-NO_MATCH = "nomatch"
-BASELINE_BASELINE = "baseline_baseline"
-CANDIDATE_CANDIDATE = "candidate_candidate"
-CANDIDATE_BASELINE = "candidate_baseline"
 
-STRING_COLUMNS = (
-    "id",
-    "record_type",
-    "base_id",
-    "base_record_type",
-    "match_type",
-    "match_sub_type",
-    "cluster_id",
-    "provider",
-    "base_provider",
-)
+# Defaults of the numeric match columns. The rest are strings.
+NUMERIC_COLUMN_DEFAULTS = {"composite_score": -1.0, "base_active": 1}
 
 
 def coalesce_match_schema(matches: DataFrame) -> DataFrame:
     """Add the match columns that ``matches`` lacks, with null (or default) values."""
-    for name in STRING_COLUMNS:
-        if name not in matches.columns:
-            matches = matches.withColumn(name, F.lit(None).cast("string"))
-    if "composite_score" not in matches.columns:
-        matches = matches.withColumn("composite_score", F.lit(-1.0))
-    if "base_active" not in matches.columns:
-        matches = matches.withColumn("base_active", F.lit(1))
+    for column_name in MATCH_RESULT_COLUMNS:
+        if column_name not in matches.columns:
+            default = NUMERIC_COLUMN_DEFAULTS.get(column_name)
+            value = F.lit(None).cast("string") if default is None else F.lit(default)
+            matches = matches.withColumn(column_name, value)
     return matches
 
 
