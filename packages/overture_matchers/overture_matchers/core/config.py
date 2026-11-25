@@ -107,8 +107,6 @@ def _parse_path_map(param: str, value: Any) -> dict[str, list[str]]:
     return path_map
 
 
-# TODO: Split theme-specific fields out of this shared RunConfig once the other
-# themes land, so unrelated runs do not carry null fields in config.json.
 @dataclass(frozen=True)
 class RunConfig:
     """Settings for one matching run.
